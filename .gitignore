@@ -17,3 +17,4 @@ tmp/
 *.log
 weekly-health-report-*.pdf
 renpho-body-composition-*.pdf
+docker/secret.key

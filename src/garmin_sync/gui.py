@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import secrets
 import threading
 import uuid
@@ -27,7 +28,7 @@ from werkzeug.serving import BaseWSGIServer
 from .garmin import GarminClient
 from .models import BloodPressure, ValidationError, local_now, parse_local_datetime
 from .renpho import RenphoCloud, RenphoMeasurement
-from .secrets import MacOSKeychainRenphoStore, MacOSKeychainTokenStore
+from .secrets import configured_stores
 from .service import (
     OPTIONAL_REPORT_SECTIONS,
     HealthSyncService,
@@ -105,11 +106,13 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
     app = Flask(__name__)
     app.config.update(MAX_CONTENT_LENGTH=16_384)
     token = csrf_token or secrets.token_urlsafe(32)
-    sync_service = service or HealthSyncService(
-        GarminClient(MacOSKeychainTokenStore()),
-        RenphoCloud(MacOSKeychainRenphoStore()),
-        SyncState(),
-    )
+    if service is None:
+        token_store, renpho_store = configured_stores()
+        sync_service = HealthSyncService(
+            GarminClient(token_store), RenphoCloud(renpho_store), SyncState()
+        )
+    else:
+        sync_service = service
     jobs = JobManager()
     startup_ready = threading.Event()
     app.extensions["garmin_sync_startup_ready"] = startup_ready
@@ -123,6 +126,8 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
     @app.before_request
     def protect_request() -> Response | None:
         allowed_hosts = {"127.0.0.1", "localhost"}
+        if public_host := os.environ.get("GARMIN_SYNC_PUBLIC_HOST"):
+            allowed_hosts.add(public_host)
         if request.host.split(":", 1)[0] not in allowed_hosts:
             abort(400)
         if request.method == "POST":
@@ -154,6 +159,10 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
 
     def page(body: str, *, refresh: bool = False) -> str:
         return render_template_string(PAGE, body=body, refresh=refresh)
+
+    @app.get("/health")
+    def health() -> Response:
+        return Response("ok\n", content_type="text/plain")
 
     @app.get("/")
     def index() -> str:
@@ -612,8 +621,11 @@ def _body_measurement_visual(item: Any) -> str:
 
 def run_gui(*, open_browser: bool = True, startup_timeout: float = 30.0) -> None:
     app = create_app()
-    server = LoopbackWSGIServer("127.0.0.1", 0, app)
-    url = f"http://127.0.0.1:{server.server_port}/"
+    bind = os.environ.get("GARMIN_SYNC_BIND", "127.0.0.1")
+    port = int(os.environ.get("GARMIN_SYNC_PORT", "0"))
+    server = LoopbackWSGIServer(bind, port, app)
+    browser_host = os.environ.get("GARMIN_SYNC_PUBLIC_HOST", "127.0.0.1")
+    url = f"http://{browser_host}:{server.server_port}/"
     print(f"Garmin Health Sync GUI: {url}", flush=True)
     print("Checking Garmin session and loading the latest RENPHO measurement…", flush=True)
     ready = app.extensions["garmin_sync_startup_ready"]
@@ -623,7 +635,7 @@ def run_gui(*, open_browser: bool = True, startup_timeout: float = 30.0) -> None
     else:
         print("Startup checks are still running; the GUI will show progress.", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
-    if open_browser:
+    if open_browser and os.environ.get("GARMIN_SYNC_NO_BROWSER") != "1":
         threading.Timer(0.1, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()

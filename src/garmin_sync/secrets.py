@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
+import os
+import tempfile
+from contextlib import suppress
+from pathlib import Path
 from typing import Protocol
 
 import keyring
+from cryptography.fernet import Fernet, InvalidToken
 from keyring.errors import KeyringError
 
 SERVICE = "garmin-health-sync"
@@ -19,6 +25,12 @@ class SecretStoreError(RuntimeError):
 class TokenStore(Protocol):
     def load(self) -> str | None: ...
     def save(self, token: str) -> None: ...
+    def delete(self) -> bool: ...
+
+
+class RenphoStore(Protocol):
+    def load(self) -> tuple[str, str] | None: ...
+    def save(self, email: str, password: str) -> None: ...
     def delete(self) -> bool: ...
 
 
@@ -77,3 +89,116 @@ class MacOSKeychainRenphoStore:
         except KeyringError as exc:
             raise SecretStoreError("Could not remove RENPHO credentials from Keychain") from exc
         return removed
+
+
+class EncryptedFileSecretStore:
+    """Container-friendly encrypted store; the encryption key is mounted separately."""
+
+    def __init__(self, path: Path, key_path: Path) -> None:
+        self.path = path
+        try:
+            self._cipher = Fernet(key_path.read_bytes().strip())
+        except (OSError, ValueError) as exc:
+            raise SecretStoreError(
+                "Could not read a valid container secret key; see the Docker setup in README.md"
+            ) from exc
+
+    def _read(self) -> dict[str, str]:
+        try:
+            encrypted = self.path.read_bytes()
+        except FileNotFoundError:
+            return {}
+        except OSError as exc:
+            raise SecretStoreError("Could not read the encrypted credential store") from exc
+        try:
+            value = json.loads(self._cipher.decrypt(encrypted))
+        except (InvalidToken, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise SecretStoreError(
+                "The encrypted credential store is invalid or has the wrong key"
+            ) from exc
+        if not isinstance(value, dict):
+            return {}
+        return {str(key): str(item) for key, item in value.items()}
+
+    def _write(self, values: dict[str, str]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = self._cipher.encrypt(json.dumps(values).encode())
+        fd, temporary = tempfile.mkstemp(prefix="credentials-", dir=self.path.parent)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+            os.replace(temporary, self.path)
+        except Exception as exc:
+            with suppress(OSError):
+                os.unlink(temporary)
+            raise SecretStoreError("Could not update the encrypted credential store") from exc
+
+    def load_token(self) -> str | None:
+        return self._read().get("garmin_token")
+
+    def save_token(self, token: str) -> None:
+        values = self._read()
+        values["garmin_token"] = token
+        self._write(values)
+
+    def load_renpho(self) -> tuple[str, str] | None:
+        values = self._read()
+        email, password = values.get("renpho_email"), values.get("renpho_password")
+        return (email, password) if email and password else None
+
+    def save_renpho(self, email: str, password: str) -> None:
+        values = self._read()
+        values.update(renpho_email=email, renpho_password=password)
+        self._write(values)
+
+    def delete_keys(self, *keys: str) -> bool:
+        values = self._read()
+        removed = any(key in values for key in keys)
+        for key in keys:
+            values.pop(key, None)
+        if removed:
+            self._write(values)
+        return removed
+
+
+class EncryptedFileTokenStore:
+    def __init__(self, backend: EncryptedFileSecretStore) -> None:
+        self.backend = backend
+
+    def load(self) -> str | None:
+        return self.backend.load_token()
+
+    def save(self, token: str) -> None:
+        self.backend.save_token(token)
+
+    def delete(self) -> bool:
+        return self.backend.delete_keys("garmin_token")
+
+
+class EncryptedFileRenphoStore:
+    def __init__(self, backend: EncryptedFileSecretStore) -> None:
+        self.backend = backend
+
+    def load(self) -> tuple[str, str] | None:
+        return self.backend.load_renpho()
+
+    def save(self, email: str, password: str) -> None:
+        self.backend.save_renpho(email, password)
+
+    def delete(self) -> bool:
+        return self.backend.delete_keys("renpho_email", "renpho_password")
+
+
+def configured_stores() -> tuple[TokenStore, RenphoStore]:
+    """Select Keychain natively and encrypted storage only when explicitly configured."""
+    data_dir = os.environ.get("GARMIN_SYNC_DATA_DIR")
+    key_file = os.environ.get("GARMIN_SYNC_SECRET_KEY_FILE")
+    if bool(data_dir) != bool(key_file):
+        raise SecretStoreError(
+            "GARMIN_SYNC_DATA_DIR and GARMIN_SYNC_SECRET_KEY_FILE must be configured together"
+        )
+    if data_dir and key_file:
+        backend = EncryptedFileSecretStore(Path(data_dir) / "credentials.enc", Path(key_file))
+        return EncryptedFileTokenStore(backend), EncryptedFileRenphoStore(backend)
+    return MacOSKeychainTokenStore(), MacOSKeychainRenphoStore()

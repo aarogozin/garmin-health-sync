@@ -13,9 +13,10 @@ from .models import BloodPressure, BodyComposition, ValidationError, parse_local
 from .renpho import RenphoCloud, RenphoError, SuppliedCredentials
 from .schedule import ScheduleError
 from .secrets import (
-    MacOSKeychainRenphoStore,
-    MacOSKeychainTokenStore,
+    RenphoStore,
     SecretStoreError,
+    TokenStore,
+    configured_stores,
 )
 from .service import HealthSyncService, ResultStatus
 from .state import SyncState, SyncStateError
@@ -31,10 +32,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--diagnostic", action="store_true", help="show safe operational diagnostics"
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("login", help="authenticate and save an OAuth session in macOS Keychain")
+    sub.add_parser("login", help="authenticate and save an OAuth session securely")
     sub.add_parser("add", help="open the measurement wizard")
     sub.add_parser("status", help="verify the saved Garmin session")
-    sub.add_parser("logout", help="remove the saved session from macOS Keychain")
+    sub.add_parser("logout", help="remove the saved session")
     sub.add_parser("gui", help="open the local web interface")
     renpho = sub.add_parser("renpho", help="sync body composition from RENPHO cloud")
     renpho_sub = renpho.add_subparsers(dest="renpho_command", required=True)
@@ -65,9 +66,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         logging.info(
             "Safe diagnostics enabled; HTTP headers, bodies, credentials, and tokens are suppressed"
         )
-    store = MacOSKeychainTokenStore()
+    store, renpho_store = configured_stores()
     client = GarminClient(store)
-    renpho_store = MacOSKeychainRenphoStore()
     try:
         if args.command == "login":
             return login_command(client)
@@ -126,7 +126,7 @@ def add_command(client: GarminClient, input_fn: Input = input) -> int:
     return 0
 
 
-def logout_command(store: MacOSKeychainTokenStore, input_fn: Input = input) -> int:
+def logout_command(store: TokenStore, input_fn: Input = input) -> int:
     if not _confirm("Remove the saved Garmin session? [y/N]: ", input_fn):
         print("Cancelled.")
         return 0
@@ -137,7 +137,7 @@ def logout_command(store: MacOSKeychainTokenStore, input_fn: Input = input) -> i
 def renpho_command(
     args: argparse.Namespace,
     garmin: GarminClient,
-    store: MacOSKeychainRenphoStore,
+    store: RenphoStore,
     input_fn: Input = input,
 ) -> int:
     if args.renpho_command == "login":
@@ -147,7 +147,7 @@ def renpho_command(
             raise ValidationError("Password is required")
         RenphoCloud(SuppliedCredentials(email, password)).authenticate()
         store.save(email, password)
-        print("RENPHO login successful; credentials saved in macOS Keychain.")
+        print("RENPHO login successful; credentials saved securely.")
         return 0
     if args.renpho_command == "status":
         RenphoCloud(store).authenticate()

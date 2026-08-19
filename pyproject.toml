@@ -1,6 +1,6 @@
 [project]
 name = "garmin-health-sync"
-version = "0.9.0"
+version = "0.10.0"
 description = "Local CLI for manually logging body composition and blood pressure to Garmin Connect"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -11,6 +11,7 @@ dependencies = [
     "flask==3.1.3",
     "reportlab==5.0.0",
     "pypdf==6.16.1",
+    "cryptography>=46.0,<47",
 ]
 
 [project.scripts]

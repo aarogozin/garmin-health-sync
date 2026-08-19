@@ -1,0 +1,25 @@
+services:
+  app:
+    build: .
+    image: garmin-health-sync:local
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - garmin-sync-data:/data
+    secrets:
+      - garmin_sync_key
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+volumes:
+  garmin-sync-data:
+
+secrets:
+  garmin_sync_key:
+    file: ./docker/secret.key

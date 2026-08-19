@@ -1,169 +1,184 @@
 # Garmin Health Sync
 
-The local GUI can display RENPHO scale history and read-only body-circumference
-history (neck, shoulders, chest, waist, abdomen, hips, arms, thighs and calves)
-from the saved RENPHO account. These measurements remain in memory and are not
-uploaded to Garmin, which has no matching fields.
-
-Локальная CLI-утилита и защищённый web GUI для отправки состава тела и артериального
-давления в личный Garmin Connect.
+A privacy-first local CLI and web dashboard that brings health data from RENPHO and manual blood-pressure readings into Garmin Connect, then combines them with Garmin activity and recovery data in a seven-day report.
 
 > [!WARNING]
-> Интеграция использует неофициальные внутренние интерфейсы Garmin Connect и может перестать работать после изменений Garmin. Это не медицинская система хранения данных. Всегда сверяйте результат в Garmin Connect.
+> This project uses unofficial Garmin Connect and reverse-engineered RENPHO APIs. They may change without notice. The application is for personal tracking, not diagnosis or medical record keeping. Verify writes in Garmin Connect and consult a healthcare professional about medical measurements.
 
-## Установка
+## What it does
 
-Требуются macOS, Python 3.12+ и [uv](https://docs.astral.sh/uv/).
+- Uploads RENPHO weight and compatible body-composition metrics to Garmin Connect.
+- Adds manual blood-pressure readings with exact duplicate detection.
+- Shows RENPHO body-composition and circumference history.
+- Produces an English web/PDF weekly report with activities, sleep, HR/HRV, stress, Body Battery, readiness, blood pressure, weight and other available Garmin domains.
+- Provides rule-based, source-linked observations without claiming diagnosis or causation.
+- Supports an English localhost GUI, CLI workflows and daily macOS `launchd` synchronization.
+
+All report snapshots, PDFs, GPS routes and detailed health records remain in process memory. The application does not log API bodies, tokens, passwords or health values.
+
+## Quick start on macOS
+
+Requirements: macOS, Python 3.12+, and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv sync
+git clone git@github.com:aarogozin/garmin-health-sync.git
+cd garmin-health-sync
+uv sync --frozen
+
 uv run garmin-sync login
-```
-
-Пароль вводится скрыто и не сохраняется. OAuth-сессия хранится в macOS Keychain под именем `garmin-health-sync`.
-
-Для облачной синхронизации RENPHO используется неофициальный reverse-engineered API через
-закреплённую версию `renpho-py`. Логин и пароль RENPHO сохраняются только в macOS Keychain;
-небезопасный debug-режим сторонней библиотеки принудительно отключён.
-
-## Использование
-
-```bash
-# Войти или обновить недействительную сессию
-uv run garmin-sync login
-
-# Добавить измерение через пошаговый мастер
-uv run garmin-sync add
-
-# Проверить сессию без записи данных
-uv run garmin-sync status
-
-# Удалить локальную сессию
-uv run garmin-sync logout
-```
-
-### Локальный GUI
-
-```bash
+uv run garmin-sync renpho login
 uv run garmin-sync gui
 ```
 
-Команда запускает интерфейс только на случайном порту `127.0.0.1`, открывает системный браузер и
-работает до `Ctrl+C`. В GUI доступны статус Garmin, ручная форма давления и RENPHO-синхронизация
-последнего замера или истории. Login/logout остаются CLI-командами, пароли в браузер не передаются.
+Garmin OAuth data and RENPHO credentials are stored in macOS Keychain under the `garmin-health-sync` service. The Garmin password is used only during login and is never saved.
 
-GUI полностью англоязычный. Последний замер RENPHO загружается в фоне при запуске и может быть
-обновлён кнопкой `Refresh latest measurement`. Полный Body Composition Analysis Report содержит
-score, optimal ranges, segmental fat/muscle analysis, impedance и остальные показатели RENPHO.
-Его можно открыть в новой вкладке или скачать. При отсутствии проверенного vendor endpoint отчёт
-рендерится локально из raw RENPHO data; PDF и полная запись хранятся только в памяти процесса.
-
-Перед отправкой давления показывается подтверждение. Точное совпадение даты, времени,
-систолического, диастолического давления и пульса считается дублем и не отправляется повторно.
-Сетевые операции выполняются последовательно; пока одна операция идёт, новая не запускается.
-
-Кнопка `Generate 7-day health report` создаёт отдельную английскую web-страницу и
-многостраничный A4 PDF за текущий и шесть предыдущих дней. Отчёт объединяет тренировки,
-steps/intensity, sleep stages и score, HR/HRV, stress, Body Battery, readiness, SpO₂,
-respiration, hydration/nutrition totals, давление и измерения тела из Garmin и RENPHO.
-Lifestyle Logging анализируется в осторожном 30-дневном контексте; сравнения появляются
-только при достаточном количестве дней и описываются как association, а не причинность.
-Weekly overview также содержит прозрачные rule-based insights по активности, сну, stress,
-домашнему давлению и BIA-трендам. Каждое правило показывает confidence и первичный источник;
-при недостаточном покрытии приложение не формирует рекомендацию.
-В конце web/PDF эти выводы собираются в единый раздел `Practical next steps`.
-
-Web-версия содержит локальные интерактивные SVG-графики с tooltip, keyboard focus и
-переключаемыми сериями. CDN, внешние шрифты и analytics не используются. Маршруты и location
-names включаются только при явной отметке checkbox перед генерацией. Второй opt-in checkbox
-добавляет бесплатную OpenStreetMap-подложку через локальный slippy-map renderer; при этом
-OpenStreetMap получает IP и номера tiles, соответствующие области маршрута. Без этого opt-in
-трек рисуется полностью локально. Snapshot, chart JSON, GPS и PDF существуют только в памяти.
-Совпадающие точки веса помечаются как `RENPHO + Garmin`; недоступные секции не блокируют
-частичный отчёт.
-
-Названия тренировок в web-report открывают соответствующую activity detail page в Garmin
-Connect. Deep link создаётся только для проверенного числового `activityId`.
-
-Текстовые observations предназначены для отслеживания тенденций, а не для диагностики.
-Отчёт использует рекомендации WHO по физической активности и европейские ориентиры ESC
-для домашнего давления, отдельно предупреждая об ограничениях consumer wearables и BIA.
-
-GUI принимает изменяющие запросы только через POST со случайным для каждого запуска CSRF-токеном,
-проверяет `Host`/`Origin`, ограничивает размер запросов и запрещает внешние ресурсы через CSP.
-
-### RENPHO
+## CLI reference
 
 ```bash
-# Проверить RENPHO-аккаунт и сохранить данные в Keychain
+# Garmin
+uv run garmin-sync login
+uv run garmin-sync status
+uv run garmin-sync add
+uv run garmin-sync logout
+
+# RENPHO
 uv run garmin-sync renpho login
-
-# Проверить сохранённые данные без загрузки в Garmin
 uv run garmin-sync renpho status
-
-# Загрузить только самый новый замер (режим по умолчанию)
 uv run garmin-sync renpho sync --latest
-
-# Загрузить всю ещё не синхронизированную историю
 uv run garmin-sync renpho sync --all
-
-# Удалить RENPHO-логин и пароль из Keychain
+uv run garmin-sync renpho sync --latest --yes
 uv run garmin-sync renpho logout
+
+# Local web dashboard
+uv run garmin-sync gui
+
+# Safe operational diagnostics (never request/response bodies or secrets)
+uv run garmin-sync --diagnostic status
 ```
 
-### Ежедневная синхронизация RENPHO
+Uploads require confirmation unless `--yes` is explicitly used for RENPHO synchronization. Exit code `3` means Garmin returned an uncertain write result: inspect Garmin Connect before retrying to avoid a duplicate.
 
-На macOS расписание устанавливается через `launchd`. Перед установкой один раз проверьте, что
-обе сессии работают командами `status` и `renpho status`.
+## Dashboard and reports
+
+`garmin-sync gui` waits for initial account checks, opens a random `127.0.0.1` port in the system browser and runs until `Ctrl+C`.
+
+The dashboard provides Garmin status and manual blood pressure; RENPHO sync, composition and circumference history; and a seven-day web/PDF report with a 30-day Lifestyle Logging context. Charts, activity links and optional GPS routes are available locally.
+
+External scripts, fonts and analytics are blocked. Route maps are local by default. Enabling the OpenStreetMap background is an explicit opt-in that exposes your IP address and requested tile region to OpenStreetMap.
+
+## Docker
+
+Docker uses an encrypted persistent credential store because a Linux container cannot access macOS Keychain. The encrypted data volume and its key must be backed up together, but stored separately. Neither is committed to Git.
+
+### 1. Create the local encryption key
 
 ```bash
-# Каждый день в 09:00 по локальному времени Mac
-uv run garmin-sync schedule install
+mkdir -p docker
+python3 -c 'import base64,secrets,pathlib; pathlib.Path("docker/secret.key").write_bytes(base64.urlsafe_b64encode(secrets.token_bytes(32)))'
+chmod 600 docker/secret.key
+```
 
-# Или, например, каждый день в 07:30
+`docker/secret.key` is ignored by both Git and the Docker build context. Never commit or paste it into Compose environment variables.
+
+### 2. Build and authenticate
+
+```bash
+docker compose build
+docker compose run --rm app login
+docker compose run --rm app renpho login
+docker compose run --rm app status
+```
+
+The interactive commands support Garmin MFA. Credentials are encrypted into the `garmin-sync-data` Docker volume using the mounted key.
+
+### 3. Start the dashboard
+
+```bash
+docker compose up -d
+open http://localhost:8080       # macOS
+# Visit http://localhost:8080 on other platforms.
+
+docker compose ps
+docker compose logs --tail=50
+docker compose down
+```
+
+Compose publishes only `127.0.0.1:8080`, drops Linux capabilities, enables `no-new-privileges`, uses a read-only root filesystem and runs as an unprivileged user. Do not expose this service through a public reverse proxy.
+
+To update:
+
+```bash
+git pull --ff-only
+docker compose build --pull
+docker compose up -d
+```
+
+To remove container data, first run `docker compose down`, then explicitly remove the `garmin-sync-data` volume. That operation permanently deletes saved sessions and duplicate-protection state.
+
+### Docker limitations
+
+- macOS `schedule` commands use `launchd` and are unavailable inside Linux containers;
+- the container does not open a browser automatically;
+- changing or losing `docker/secret.key` makes the encrypted credential volume unreadable;
+- Docker improves portability, not the stability of unofficial vendor APIs.
+
+## Daily RENPHO sync on macOS
+
+First verify `status` and `renpho status`, then install the job:
+
+```bash
+uv run garmin-sync schedule install                 # daily at 09:00
 uv run garmin-sync schedule install --hour 7 --minute 30
-
 uv run garmin-sync schedule status
 uv run garmin-sync schedule run
 uv run garmin-sync schedule uninstall
 ```
 
-Фоновая задача загружает только последний ещё не обработанный замер RENPHO. Проверки дубликата
-и конфликтующей записи Garmin выполняются до загрузки. Автоматический повтор после
-неопределённого ответа Garmin запрещён. Журнал не содержит паролей, токенов и HTTP-ответов и
-находится в `~/Library/Logs/GarminHealthSync/renpho-sync.log`.
+The job uploads only the latest unsynchronized measurement. Its sanitized operational log is at `~/Library/Logs/GarminHealthSync/renpho-sync.log`. Duplicate state is stored with mode `0600` at `~/Library/Application Support/garmin-health-sync/state.json`; it contains source IDs, not medical values or credentials.
 
-Перед отправкой программа показывает число записей, диапазон дат и последний выбранный замер.
-Garmin отображает одну итоговую запись состава тела за календарный день, поэтому при нескольких
-взвешиваниях RENPHO программа выбирает последнее за день. История загружается от старых дней к
-новым. Если на дате уже есть другая запись Garmin, день отмечается как конфликт и не
-перезаписывается. После каждого подтверждённого Garmin замера его
-RENPHO ID записывается в `~/Library/Application Support/garmin-health-sync/state.json`, чтобы
-повторный запуск не создавал дубликаты. Файл не содержит медицинских значений или секретов. При
-его удалении защита от повторной загрузки ранее импортированной истории будет потеряна.
+## Data behavior
 
-Поля RENPHO `muscle` и `bone`, возвращаемые cloud API в процентах, переводятся в килограммы.
-Вес, BMI, жир, вода, BMR и висцеральный жир переносятся в совместимые поля Garmin. Метаболический
-возраст показывается в предпросмотре, но не отправляется: Garmin Connect повреждает это поле при
-FIT-импорте. Записи без времени, веса или с некорректными значениями пропускаются с предупреждением.
+- Naive timestamps use `Europe/Berlin`; decimal comma and decimal point are accepted.
+- When RENPHO has several readings on one day, the last reading is selected because Garmin exposes one resulting body-composition record per calendar day.
+- A conflicting Garmin weight is never overwritten automatically.
+- RENPHO muscle and bone percentages are converted to kilograms. Metabolic age is displayed but not sent because Garmin FIT import corrupts that field.
+- Blood-pressure duplicates match UTC timestamp, systolic, diastolic and pulse before any POST and are verified after a write.
+- A network failure or ambiguous response never triggers an automatic write retry.
 
-Время без явного часового пояса интерпретируется как `Europe/Berlin`. Десятичные значения можно вводить с точкой или запятой. Ничего не отправляется до явного ответа `y`/`yes` на итоговом экране.
+## Security model
 
-Безопасная диагностика показывает только операционные сообщения и никогда не включает HTTP-заголовки, тела запросов, пароль или токены:
+- Native secrets: macOS Keychain.
+- Container secrets: Fernet-encrypted `credentials.enc`, mode `0600`, with a separately mounted key.
+- GUI: loopback only, per-process CSRF token, Host/Origin validation, POST-only mutations, request-size limits, CSP and output escaping.
+- Dependencies are locked in `uv.lock`; containers install with `uv sync --frozen`.
+- `.env`, secret keys, state, logs, generated PDFs, caches and virtual environments are ignored.
+
+This is a single-user local application. It has no multi-user authorization layer and must not be exposed directly to a LAN or the internet.
+
+## Troubleshooting
+
+**No saved Garmin session** — run `garmin-sync login` in the same native environment or Docker volume used by the GUI.
+
+**RENPHO unavailable** — run `garmin-sync renpho status`; vendor API changes may require a dependency update.
+
+**Docker reports an invalid credential store** — confirm the same `docker/secret.key` is mounted. Do not overwrite the key if the existing volume contains credentials.
+
+**Garmin rate limit or uncertain upload** — do not retry automatically. Wait, inspect Garmin Connect, then retry only if the record is absent.
+
+**Report is partial** — unavailable device-specific domains are reported explicitly; data already collected remains usable.
+
+## Development
 
 ```bash
-uv run garmin-sync --diagnostic status
-```
-
-Код возврата `3` означает неопределённый итог загрузки: не повторяйте команду, пока не проверите Garmin Connect вручную.
-
-## Разработка
-
-```bash
-uv sync --group dev
+uv sync --frozen --group dev
 uv run ruff check .
 uv run mypy
 uv run pytest
+uv lock --check
 ```
 
-Тесты используют поддельный Garmin-клиент и не обращаются к реальному аккаунту. Ручной smoke-тест выполняется только владельцем аккаунта: добавьте по одной тестовой записи каждого типа, проверьте их в Garmin Connect и удалите через официальный интерфейс.
+Tests use fake clients and do not contact real accounts. A manual smoke test should use disposable readings that can be checked and removed in the official Garmin interface.
+
+## Legal and attribution
+
+This project is not affiliated with Garmin or RENPHO. Garmin, Garmin Connect and RENPHO are trademarks of their respective owners. Third-party asset attribution is documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

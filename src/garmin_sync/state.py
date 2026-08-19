@@ -9,6 +9,8 @@ from typing import Any
 
 
 def default_state_path() -> Path:
+    if data_dir := os.environ.get("GARMIN_SYNC_DATA_DIR"):
+        return Path(data_dir) / "state.json"
     return Path.home() / "Library" / "Application Support" / "garmin-health-sync" / "state.json"
 
 
