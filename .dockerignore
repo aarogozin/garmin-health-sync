@@ -1,5 +1,6 @@
 .git
 .github
+.gstack
 .venv
 .pytest_cache
 .mypy_cache
@@ -10,6 +11,7 @@ __pycache__
 .env
 .env.*
 docker/secret.key
+docker/*.enc
 dist
 tmp
 *.log

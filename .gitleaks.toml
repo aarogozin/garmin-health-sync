@@ -1,0 +1,13 @@
+title = "garmin-health-sync secret scanning"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known non-secret Keychain account labels"
+regexTarget = "match"
+regexes = [
+  '''oauth-session''',
+  '''renpho-email''',
+  '''renpho-password''',
+]

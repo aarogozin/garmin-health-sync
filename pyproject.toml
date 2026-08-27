@@ -1,9 +1,22 @@
 [project]
 name = "garmin-health-sync"
-version = "0.10.0"
+version = "0.11.0"
 description = "Local CLI for manually logging body composition and blood pressure to Garmin Connect"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
+keywords = ["garmin", "renpho", "health", "fitness", "body-composition"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Utilities",
+]
 dependencies = [
     "garminconnect==0.3.5",
     "keyring>=25.6,<26",
@@ -11,8 +24,14 @@ dependencies = [
     "flask==3.1.3",
     "reportlab==5.0.0",
     "pypdf==6.16.1",
-    "cryptography>=46.0,<47",
+    "cryptography>=50.0,<51",
 ]
+
+[project.urls]
+Homepage = "https://github.com/aarogozin/garmin-health-sync"
+Repository = "https://github.com/aarogozin/garmin-health-sync"
+Issues = "https://github.com/aarogozin/garmin-health-sync/issues"
+Security = "https://github.com/aarogozin/garmin-health-sync/security/policy"
 
 [project.scripts]
 garmin-sync = "garmin_sync.cli:main"

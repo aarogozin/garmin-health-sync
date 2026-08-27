@@ -36,10 +36,8 @@ def install(*, hour: int, minute: int) -> Path:
             sys.executable,
             "-m",
             "garmin_sync.cli",
-            "renpho",
             "sync",
-            "--latest",
-            "--yes",
+            "daily",
         ],
         "StartCalendarInterval": {"Hour": hour, "Minute": minute},
         "StandardOutPath": str(output),
@@ -91,6 +89,22 @@ def is_loaded() -> bool:
         text=True,
     )
     return result.returncode == 0
+
+
+def is_legacy() -> bool:
+    try:
+        payload = plistlib.loads(plist_path().read_bytes())
+    except (FileNotFoundError, OSError, plistlib.InvalidFileException):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    arguments = payload.get("ProgramArguments", [])
+    return isinstance(arguments, list) and arguments[-4:] == [
+        "renpho",
+        "sync",
+        "--latest",
+        "--yes",
+    ]
 
 
 def run_now() -> None:

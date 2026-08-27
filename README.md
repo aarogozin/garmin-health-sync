@@ -1,5 +1,9 @@
 # Garmin Health Sync
 
+[![CI](https://github.com/aarogozin/garmin-health-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/aarogozin/garmin-health-sync/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/aarogozin/garmin-health-sync)](https://github.com/aarogozin/garmin-health-sync/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A privacy-first local CLI and web dashboard that brings health data from RENPHO and manual blood-pressure readings into Garmin Connect, then combines them with Garmin activity and recovery data in a seven-day report.
 
 > [!WARNING]
@@ -8,6 +12,7 @@ A privacy-first local CLI and web dashboard that brings health data from RENPHO 
 ## What it does
 
 - Uploads RENPHO weight and compatible body-composition metrics to Garmin Connect.
+- Experimentally copies Garmin activity summaries to RENPHO (type, start time, duration and calories).
 - Adds manual blood-pressure readings with exact duplicate detection.
 - Shows RENPHO body-composition and circumference history.
 - Produces an English web/PDF weekly report with activities, sleep, HR/HRV, stress, Body Battery, readiness, blood pressure, weight and other available Garmin domains.
@@ -21,7 +26,7 @@ All report snapshots, PDFs, GPS routes and detailed health records remain in pro
 Requirements: macOS, Python 3.12+, and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone git@github.com:aarogozin/garmin-health-sync.git
+git clone https://github.com/aarogozin/garmin-health-sync.git
 cd garmin-health-sync
 uv sync --frozen
 
@@ -49,6 +54,15 @@ uv run garmin-sync renpho sync --all
 uv run garmin-sync renpho sync --latest --yes
 uv run garmin-sync renpho logout
 
+# Experimental Garmin → RENPHO activity summaries
+uv run garmin-sync activities preview --period day
+uv run garmin-sync activities sync --period day
+uv run garmin-sync activities sync --period month
+uv run garmin-sync activities sync --period all
+
+# Both directions: latest RENPHO weight and the last 24h of Garmin activities
+uv run garmin-sync sync daily
+
 # Local web dashboard
 uv run garmin-sync gui
 
@@ -56,13 +70,13 @@ uv run garmin-sync gui
 uv run garmin-sync --diagnostic status
 ```
 
-Uploads require confirmation unless `--yes` is explicitly used for RENPHO synchronization. Exit code `3` means Garmin returned an uncertain write result: inspect Garmin Connect before retrying to avoid a duplicate.
+Uploads require confirmation unless `--yes` is explicitly used. Exit code `3` means Garmin or RENPHO returned an uncertain write result: inspect the destination before retrying to avoid a duplicate.
 
 ## Dashboard and reports
 
 `garmin-sync gui` waits for initial account checks, opens a random `127.0.0.1` port in the system browser and runs until `Ctrl+C`.
 
-The dashboard provides Garmin status and manual blood pressure; RENPHO sync, composition and circumference history; and a seven-day web/PDF report with a 30-day Lifestyle Logging context. Charts, activity links and optional GPS routes are available locally.
+The dashboard provides Garmin status and manual blood pressure; RENPHO sync, composition and circumference history; previewed Garmin → RENPHO activity sync for 24 hours, 30 days or all time; and a seven-day web/PDF report with a 30-day Lifestyle Logging context. Charts, activity links and optional GPS routes are available locally.
 
 External scripts, fonts and analytics are blocked. Route maps are local by default. Enabling the OpenStreetMap background is an explicit opt-in that exposes your IP address and requested tile region to OpenStreetMap.
 
@@ -122,7 +136,7 @@ To remove container data, first run `docker compose down`, then explicitly remov
 - changing or losing `docker/secret.key` makes the encrypted credential volume unreadable;
 - Docker improves portability, not the stability of unofficial vendor APIs.
 
-## Daily RENPHO sync on macOS
+## Daily bidirectional sync on macOS
 
 First verify `status` and `renpho status`, then install the job:
 
@@ -134,7 +148,7 @@ uv run garmin-sync schedule run
 uv run garmin-sync schedule uninstall
 ```
 
-The job uploads only the latest unsynchronized measurement. Its sanitized operational log is at `~/Library/Logs/GarminHealthSync/renpho-sync.log`. Duplicate state is stored with mode `0600` at `~/Library/Application Support/garmin-health-sync/state.json`; it contains source IDs, not medical values or credentials.
+The job uploads the latest unsynchronized RENPHO measurement to Garmin, then copies mapped Garmin activities from the rolling previous 24 hours to RENPHO. Re-run `schedule install` after upgrading from a weight-only schedule. Its sanitized operational log is at `~/Library/Logs/GarminHealthSync/renpho-sync.log`. Duplicate state is stored with mode `0600` at `~/Library/Application Support/garmin-health-sync/state.json`; Garmin activity IDs are stored only as hashes and no activity values are persisted.
 
 ## Data behavior
 
@@ -144,6 +158,8 @@ The job uploads only the latest unsynchronized measurement. Its sanitized operat
 - RENPHO muscle and bone percentages are converted to kilograms. Metabolic age is displayed but not sent because Garmin FIT import corrupts that field.
 - Blood-pressure duplicates match UTC timestamp, systolic, diastolic and pulse before any POST and are verified after a write.
 - A network failure or ambiguous response never triggers an automatic write retry.
+- Garmin → RENPHO is experimental and uses an undocumented endpoint. Unknown activity types are skipped; RENPHO receives only the mapped type, start time, duration and integer calories.
+- Imported summaries appear in RENPHO's manual activity area (`Quick Log` / `Activity Management`), not in device workout history. The exact label may vary by RENPHO app version.
 
 ## Security model
 
@@ -154,6 +170,8 @@ The job uploads only the latest unsynchronized measurement. Its sanitized operat
 - `.env`, secret keys, state, logs, generated PDFs, caches and virtual environments are ignored.
 
 This is a single-user local application. It has no multi-user authorization layer and must not be exposed directly to a LAN or the internet.
+
+Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md). Do not include credentials, tokens, health records or diagnostic dumps in a public issue.
 
 ## Troubleshooting
 
@@ -178,6 +196,8 @@ uv lock --check
 ```
 
 Tests use fake clients and do not contact real accounts. A manual smoke test should use disposable readings that can be checked and removed in the official Garmin interface.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution and release checks. Changes are documented in [CHANGELOG.md](CHANGELOG.md).
 
 ## Legal and attribution
 

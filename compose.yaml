@@ -9,6 +9,8 @@ services:
     secrets:
       - garmin_sync_key
     restart: unless-stopped
+    init: true
+    pids_limit: 256
     security_opt:
       - no-new-privileges:true
     cap_drop:

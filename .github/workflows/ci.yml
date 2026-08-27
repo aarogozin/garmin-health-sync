@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.6"
+          enable-cache: true
+      - name: Install Python and dependencies
+        run: uv sync --frozen --group dev --python 3.12
+      - name: Lint
+        run: uv run ruff check .
+      - name: Type check
+        run: uv run mypy
+      - name: Test with coverage
+        run: uv run pytest --cov=garmin_sync --cov-report=term --cov-fail-under=80
+      - name: Verify lockfile
+        run: uv lock --check
+      - name: Verify package version
+        run: |
+          project_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          package_version="$(uv run python -c 'import garmin_sync; print(garmin_sync.__version__)')"
+          test "$package_version" = "$project_version"
+      - name: Audit Python dependencies
+        run: |
+          audit_dir="$(mktemp -d)"
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt \
+            --no-hashes --output-file "$audit_dir/requirements.txt"
+          uvx --python 3.12 --from pip-audit pip-audit -r "$audit_dir/requirements.txt"
+      - name: Static security scan
+        run: uvx bandit -q -r src
+      - name: Build distributions
+        run: uv build
+      - name: Validate distributions
+        run: uvx twine check dist/*
+
+  compatibility:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            python: "3.12"
+          - os: ubuntu-latest
+            python: "3.14"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.6"
+          enable-cache: true
+      - name: Install and test
+        run: |
+          uv sync --frozen --group dev --python ${{ matrix.python }}
+          uv run pytest
+
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

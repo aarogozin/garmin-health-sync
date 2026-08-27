@@ -4,7 +4,13 @@ from typing import Any
 import pytest
 from garminconnect import GarminConnectAuthenticationError, GarminConnectTooManyRequestsError
 
-from garmin_sync.garmin import AuthenticationRequired, GarminClient, RateLimited, UploadUncertain
+from garmin_sync.garmin import (
+    AuthenticationRequired,
+    GarminClient,
+    GarminSyncError,
+    RateLimited,
+    UploadUncertain,
+)
 from garmin_sync.models import BERLIN, BloodPressure, BodyComposition
 
 
@@ -76,6 +82,9 @@ class FakeAPI:
     def get_blood_pressure(self, startdate: str, enddate: str | None = None):
         return self.pressure
 
+    def get_activities(self, start: int = 0, limit: int = 20):
+        return []
+
 
 def test_login_saves_tokens_not_password() -> None:
     store = MemoryStore()
@@ -88,6 +97,31 @@ def test_login_saves_tokens_not_password() -> None:
 def test_connect_requires_saved_session() -> None:
     with pytest.raises(AuthenticationRequired):
         GarminClient(MemoryStore(), FakeAPI).connect()
+
+
+def test_all_time_activities_are_paginated() -> None:
+    class Paged(FakeAPI):
+        def get_activities(self, start: int = 0, limit: int = 20):
+            if start == 0:
+                return [{"activityId": value} for value in range(limit)]
+            if start == limit:
+                return {"activityList": [{"activityId": limit}]}
+            return []
+
+    client = GarminClient(MemoryStore("x" * 600), Paged)
+    client.connect()
+    assert len(client.read_all_activities(page_size=2)) == 3
+
+
+def test_all_time_activities_stop_when_pagination_repeats() -> None:
+    class Repeating(FakeAPI):
+        def get_activities(self, start: int = 0, limit: int = 20):
+            return [{"activityId": value} for value in range(limit)]
+
+    client = GarminClient(MemoryStore("x" * 600), Repeating)
+    client.connect()
+    with pytest.raises(GarminSyncError, match="pagination did not advance"):
+        client.read_all_activities(page_size=2)
 
 
 @pytest.mark.parametrize(

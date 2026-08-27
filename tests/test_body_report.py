@@ -6,6 +6,7 @@ from pypdf import PdfReader
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
+from garmin_sync import body_report
 from garmin_sync.body_report import ReportProvider, _valid_vendor_pdf, body_composition_pdf
 from garmin_sync.models import BERLIN
 from garmin_sync.renpho_report import normalize_report
@@ -42,6 +43,14 @@ def test_body_composition_pdf_contains_normalized_values() -> None:
     image = images[0].get_object()
     assert image["/Width"] == 2480
     assert image["/Height"] == 3508
+
+
+def test_report_font_falls_back_when_macos_fonts_are_unavailable(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(body_report, "FONT", tmp_path / "missing-regular.ttf")
+    monkeypatch.setattr(body_report, "BOLD_FONT", tmp_path / "missing-bold.ttf")
+    assert body_report._font(24).getbbox("Portable report") is not None
 
 
 def test_provider_prefers_a_valid_vendor_pdf() -> None:

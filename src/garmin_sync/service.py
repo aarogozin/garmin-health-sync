@@ -2,9 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 
+from .activities import (
+    ActivitySyncCandidate,
+    ActivitySyncPreview,
+    ActivitySyncResult,
+    exact_activity_match,
+    mapped_template,
+    normalize_garmin_activity,
+    template_matches_mapping,
+)
 from .body_report import ReportDocument, ReportProvider
 from .garmin import (
     AuthenticationRequired,
@@ -14,7 +23,14 @@ from .garmin import (
     UploadUncertain,
 )
 from .models import BERLIN, BloodPressure
-from .renpho import RenphoCloud, RenphoError, RenphoGirthMeasurement, RenphoMeasurement
+from .operation_lock import write_lock
+from .renpho import (
+    RenphoCloud,
+    RenphoError,
+    RenphoGirthMeasurement,
+    RenphoMeasurement,
+    RenphoWriteUncertain,
+)
 from .state import SyncState
 from .weekly_pdf import render_weekly_report_pdf
 from .weekly_report import WeeklyHealthReport, build_report
@@ -109,12 +125,13 @@ class HealthSyncService:
 
     def add_pressure(self, measurement: BloodPressure) -> OperationResult:
         try:
-            self.garmin.connect()
-            if self.garmin.has_blood_pressure(measurement):
-                return OperationResult(
-                    ResultStatus.ALREADY_EXISTS, "This entry already exists in Garmin"
-                )
-            self.garmin.add_blood_pressure(measurement)
+            with write_lock():
+                self.garmin.connect()
+                if self.garmin.has_blood_pressure(measurement):
+                    return OperationResult(
+                        ResultStatus.ALREADY_EXISTS, "This entry already exists in Garmin"
+                    )
+                self.garmin.add_blood_pressure(measurement)
             return OperationResult(ResultStatus.SUCCESS, "Blood pressure uploaded and verified")
         except UploadUncertain as exc:
             return OperationResult(ResultStatus.UNCERTAIN, str(exc))
@@ -133,6 +150,167 @@ class HealthSyncService:
         return RenphoPreview(
             mode, tuple(item for item in candidates if item.source_id not in synced), skipped
         )
+
+    def preview_activities(
+        self, period: str, *, now: datetime | None = None
+    ) -> ActivitySyncPreview:
+        current = (now or datetime.now(BERLIN)).astimezone(BERLIN)
+        self._report_progress = {
+            "stage": "Reading Garmin activities",
+            "completed": 0,
+            "total": 3,
+        }
+        self.garmin.connect()
+        if period == "all":
+            raw = self.garmin.read_all_activities()
+            threshold = None
+        elif period in {"day", "month"}:
+            threshold = (
+                current.astimezone(UTC)
+                - timedelta(hours=24 if period == "day" else 24 * 30)
+            ).astimezone(BERLIN)
+            raw = self.garmin.read_activities(
+                threshold.date().isoformat(), current.date().isoformat()
+            )
+        else:
+            raise RenphoError("Unknown activity sync period")
+        self._report_progress = {
+            "stage": "Reading RENPHO activities",
+            "completed": 1,
+            "total": 3,
+        }
+        normalized = [normalize_garmin_activity(item) for item in raw]
+        invalid_count = sum(item is None for item in normalized)
+        activities = [item for item in normalized if item is not None]
+        if threshold is not None:
+            activities = [
+                item
+                for item in activities
+                if threshold.timestamp() <= item.started_at.timestamp() <= current.timestamp()
+            ]
+        templates = {item.template_id: item for item in self.renpho.fetch_activity_templates()}
+        existing = self.renpho.fetch_activities()
+        candidates: list[ActivitySyncCandidate] = []
+        unknown = []
+        duplicates = 0
+        for activity in sorted(activities, key=lambda item: item.started_at):
+            mapped = mapped_template(activity)
+            server_template = templates.get(mapped.template_id) if mapped is not None else None
+            if (
+                mapped is None
+                or server_template is None
+                or not template_matches_mapping(mapped, server_template)
+            ):
+                unknown.append(activity)
+                continue
+            candidate = ActivitySyncCandidate(activity, server_template)
+            if self.state.activity_synced(activity.source_id) or any(
+                exact_activity_match(candidate, record) for record in existing
+            ):
+                duplicates += 1
+                continue
+            candidates.append(candidate)
+        self._report_progress = {
+            "stage": "Preview ready",
+            "completed": 3,
+            "total": 3,
+            "uploaded": 0,
+            "skipped": invalid_count + len(unknown) + duplicates,
+        }
+        return ActivitySyncPreview(
+            period, tuple(candidates), tuple(unknown), invalid_count, duplicates
+        )
+
+    def sync_activities(
+        self, preview: ActivitySyncPreview
+    ) -> list[ActivitySyncResult]:
+        results: list[ActivitySyncResult] = []
+        total = len(preview.candidates)
+        uploaded = 0
+        skipped = preview.invalid_count + len(preview.unknown) + preview.duplicate_count
+        with write_lock():
+            existing = list(self.renpho.fetch_activities())
+            for index, candidate in enumerate(preview.candidates, start=1):
+                activity = candidate.activity
+                self._report_progress = {
+                    "stage": f"Uploading activity {index} of {total}",
+                    "completed": index - 1,
+                    "total": max(1, total),
+                    "uploaded": uploaded,
+                    "skipped": skipped,
+                }
+                if self.state.activity_synced(activity.source_id) or any(
+                    exact_activity_match(candidate, record) for record in existing
+                ):
+                    self.state.mark_activity_synced(activity.source_id)
+                    skipped += 1
+                    results.append(
+                        ActivitySyncResult(
+                            ResultStatus.ALREADY_EXISTS.value,
+                            activity.source_id,
+                            f"{activity.name}: already exists in RENPHO",
+                        )
+                    )
+                    continue
+                try:
+                    self.renpho.create_activity(
+                        template=candidate.template,
+                        started_at=activity.started_at,
+                        duration_seconds=activity.duration_seconds,
+                        calories=activity.calories,
+                    )
+                except RenphoWriteUncertain as exc:
+                    results.append(
+                        ActivitySyncResult(
+                            ResultStatus.UNCERTAIN.value, activity.source_id, str(exc)
+                        )
+                    )
+                    break
+                except RenphoError as exc:
+                    results.append(
+                        ActivitySyncResult(ResultStatus.ERROR.value, activity.source_id, str(exc))
+                    )
+                    break
+                try:
+                    verified = list(self.renpho.fetch_activities())
+                except RenphoError:
+                    results.append(
+                        ActivitySyncResult(
+                            ResultStatus.UNCERTAIN.value,
+                            activity.source_id,
+                            "RENPHO accepted the upload response but verification failed; "
+                            "check RENPHO before retrying",
+                        )
+                    )
+                    break
+                if not any(exact_activity_match(candidate, record) for record in verified):
+                    results.append(
+                        ActivitySyncResult(
+                            ResultStatus.UNCERTAIN.value,
+                            activity.source_id,
+                            "RENPHO did not return the uploaded activity; "
+                            "check RENPHO before retrying",
+                        )
+                    )
+                    break
+                existing = verified
+                self.state.mark_activity_synced(activity.source_id)
+                uploaded += 1
+                results.append(
+                    ActivitySyncResult(
+                        ResultStatus.SUCCESS.value,
+                        activity.source_id,
+                        f"{activity.name}: uploaded and verified",
+                    )
+                )
+        self._report_progress = {
+            "stage": "Activity sync complete",
+            "completed": len(results),
+            "total": max(1, total),
+            "uploaded": uploaded,
+            "skipped": skipped,
+        }
+        return results
 
     def latest_renpho(self) -> RenphoMeasurement:
         measurements, _skipped = self.renpho.fetch()
@@ -370,36 +548,38 @@ class HealthSyncService:
     def sync_renpho(self, preview: RenphoPreview) -> list[OperationResult]:
         results: list[OperationResult] = []
         try:
-            self.garmin.connect()
-            for item in preview.candidates:
-                if self.garmin.has_body_composition(item.body):
+            with write_lock():
+                self.garmin.connect()
+                for item in preview.candidates:
+                    if self.garmin.has_body_composition(item.body):
+                        self.state.mark_synced(item.source_id)
+                        results.append(
+                            OperationResult(
+                                ResultStatus.ALREADY_EXISTS,
+                                f"{item.body.measured_at.date()}: already uploaded",
+                            )
+                        )
+                        continue
+                    if self.garmin.has_body_composition_on_date(item.body):
+                        results.append(
+                            OperationResult(
+                                ResultStatus.CONFLICT,
+                                f"{item.body.measured_at.date()}: "
+                                "Garmin contains a different entry",
+                            )
+                        )
+                        continue
+                    try:
+                        self.garmin.add_body_composition(item.body)
+                    except UploadUncertain as exc:
+                        results.append(OperationResult(ResultStatus.UNCERTAIN, str(exc)))
+                        break
                     self.state.mark_synced(item.source_id)
                     results.append(
                         OperationResult(
-                            ResultStatus.ALREADY_EXISTS,
-                            f"{item.body.measured_at.date()}: already uploaded",
+                            ResultStatus.SUCCESS, f"{item.body.measured_at.date()}: uploaded"
                         )
                     )
-                    continue
-                if self.garmin.has_body_composition_on_date(item.body):
-                    results.append(
-                        OperationResult(
-                            ResultStatus.CONFLICT,
-                            f"{item.body.measured_at.date()}: Garmin contains a different entry",
-                        )
-                    )
-                    continue
-                try:
-                    self.garmin.add_body_composition(item.body)
-                except UploadUncertain as exc:
-                    results.append(OperationResult(ResultStatus.UNCERTAIN, str(exc)))
-                    break
-                self.state.mark_synced(item.source_id)
-                results.append(
-                    OperationResult(
-                        ResultStatus.SUCCESS, f"{item.body.measured_at.date()}: uploaded"
-                    )
-                )
         except GarminSyncError as exc:
             results.append(OperationResult(ResultStatus.ERROR, str(exc)))
         return results
