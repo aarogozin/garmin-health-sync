@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
@@ -380,9 +380,11 @@ def _valid_vendor_pdf(content: bytes, content_type: str) -> bool:
 
 def _font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont:
     path = BOLD_FONT if bold else FONT
-    if not path.exists():
-        raise RuntimeError("The system font required to create the report was not found")
-    return ImageFont.truetype(str(path), size)
+    if path.exists():
+        return ImageFont.truetype(str(path), size)
+    # Pillow ships a scalable fallback, keeping report generation portable to
+    # minimal Linux containers without adding an operating-system font package.
+    return cast(ImageFont.FreeTypeFont, ImageFont.load_default(size=size))
 
 
 def _metric_value(metric: ReportMetric) -> str:
