@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.6"
+      - name: Validate tag version
+        run: |
+          project_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          test "${GITHUB_REF_NAME}" = "v${project_version}"
+          git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main
+      - name: Install and test
+        run: |
+          uv sync --frozen --group dev --python 3.12
+          uv run ruff check .
+          uv run mypy
+          uv run pytest --cov=garmin_sync --cov-report=term --cov-fail-under=80
+          uv lock --check
+          package_version="$(uv run python -c 'import garmin_sync; print(garmin_sync.__version__)')"
+          test "$package_version" = "${GITHUB_REF_NAME#v}"
+      - name: Audit Python dependencies and source
+        run: |
+          audit_dir="$(mktemp -d)"
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt \
+            --no-hashes --output-file "$audit_dir/requirements.txt"
+          uvx --python 3.12 --from pip-audit pip-audit -r "$audit_dir/requirements.txt"
+          uvx bandit -q -r src
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and validate
+        run: |
+          uv build
+          uvx twine check dist/*
+          (cd dist && shasum -a 256 * > SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: garmin-health-sync-${{ github.ref_name }}
+          path: dist/
+          if-no-files-found: error
+          overwrite: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --title "Garmin Health Sync ${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --verify-tag
+          fi

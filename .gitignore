@@ -8,6 +8,7 @@
 .mypy_cache/
 .coverage
 htmlcov/
+.gstack/
 dist/
 build/
 *.egg-info/
@@ -18,3 +19,4 @@ tmp/
 weekly-health-report-*.pdf
 renpho-body-composition-*.pdf
 docker/secret.key
+docker/*.enc
