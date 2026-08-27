@@ -3,6 +3,12 @@ from datetime import datetime
 from threading import Event
 from typing import Any
 
+from garmin_sync.activities import (
+    ActivitySyncCandidate,
+    ActivitySyncPreview,
+    GarminActivity,
+    RenphoActivityTemplate,
+)
 from garmin_sync.body_report import ReportDocument
 from garmin_sync.gui import JobManager, create_app
 from garmin_sync.models import BERLIN, BodyComposition
@@ -33,6 +39,26 @@ class FakeService:
         raise RuntimeError("not used")
 
     def sync_renpho(self, preview: Any) -> list[OperationResult]:
+        return []
+
+    def preview_activities(self, period: str) -> ActivitySyncPreview:
+        activity = GarminActivity(
+            "42",
+            "running",
+            "<Morning Run>",
+            datetime(2026, 8, 15, 8, 0, tzinfo=BERLIN),
+            1800,
+            300,
+        )
+        return ActivitySyncPreview(
+            period,
+            (ActivitySyncCandidate(activity, RenphoActivityTemplate(52, "Running")),),
+            (),
+            0,
+            0,
+        )
+
+    def sync_activities(self, preview: Any) -> list[Any]:
         return []
 
     def latest_report(self) -> LatestRenphoReport:
@@ -87,7 +113,11 @@ def test_gui_index_and_security_headers() -> None:
     assert "Show OpenStreetMap background" in response.text
     assert "View body measurements" in response.text
     assert "waist, chest, arms, thighs, calves" in response.text
+    assert "Garmin → RENPHO activities" in response.text
     assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Cross-Origin-Opener-Policy"] == "same-origin"
+    assert response.headers["Cross-Origin-Resource-Policy"] == "same-origin"
+    assert response.headers["Permissions-Policy"] == "camera=(), geolocation=(), microphone=()"
 
 
 def test_startup_readiness_waits_for_garmin_and_renpho_checks() -> None:
@@ -122,6 +152,26 @@ def test_gui_rejects_bad_host_origin_and_csrf() -> None:
     )
 
 
+def test_gui_rejects_malformed_host_and_origin_values() -> None:
+    app = create_app(FakeService(), "test-token")  # type: ignore[arg-type]
+    client = app.test_client()
+    assert client.get("/", headers={"Host": "localhost:invalid"}).status_code == 400
+    assert client.get("/", headers={"Host": "attacker@localhost"}).status_code == 400
+    for origin in (
+        "ftp://localhost",
+        "http://attacker@localhost",
+        "http://localhost:invalid",
+        "http://localhost/path",
+        "http://localhost?query=yes",
+    ):
+        response = client.post(
+            "/status",
+            data={"csrf": "test-token"},
+            headers={"Host": "127.0.0.1", "Origin": origin},
+        )
+        assert response.status_code == 403
+
+
 def test_gui_accepts_private_null_origin_only_for_same_origin_navigation() -> None:
     app = create_app(FakeService(), "test-token")  # type: ignore[arg-type]
     client = app.test_client()
@@ -153,6 +203,23 @@ def test_mutating_routes_reject_get() -> None:
     client = app.test_client()
     assert client.get("/status", headers={"Host": "127.0.0.1"}).status_code == 405
     assert client.get("/pressure/submit", headers={"Host": "127.0.0.1"}).status_code == 405
+    assert client.get("/activities/preview", headers={"Host": "127.0.0.1"}).status_code == 405
+
+
+def test_activity_preview_is_csrf_protected_and_escaped() -> None:
+    app = create_app(FakeService(), "test-token")  # type: ignore[arg-type]
+    assert app.extensions["garmin_sync_startup_ready"].wait(timeout=2)
+    client = app.test_client()
+    assert client.post("/activities/preview", headers={"Host": "127.0.0.1"}).status_code == 403
+    started = client.post(
+        "/activities/preview",
+        data={"csrf": "test-token", "period": "day"},
+        headers={"Host": "127.0.0.1"},
+    )
+    result = client.get(started.headers["Location"], headers={"Host": "127.0.0.1"})
+    assert "Confirm Garmin → RENPHO activity sync" in result.text
+    assert "&lt;Morning Run&gt;" in result.text
+    assert "<Morning Run>" not in result.text
 
 
 def test_pressure_confirmation_escapes_notes() -> None:

@@ -29,7 +29,7 @@ def test_install_writes_private_launch_agent(
     payload = plistlib.loads(target.read_bytes())
 
     assert payload["StartCalendarInterval"] == {"Hour": 7, "Minute": 30}
-    assert payload["ProgramArguments"][-4:] == ["renpho", "sync", "--latest", "--yes"]
+    assert payload["ProgramArguments"][-2:] == ["sync", "daily"]
     assert target.stat().st_mode & 0o777 == 0o600
     assert calls[0][1] == "bootout"
     assert calls[1][1] == "bootstrap"
@@ -62,3 +62,15 @@ def test_is_loaded_uses_launchctl_result(monkeypatch: pytest.MonkeyPatch) -> Non
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert schedule.is_loaded() is True
+
+
+def test_legacy_schedule_is_detected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    target = schedule.plist_path()
+    target.parent.mkdir(parents=True)
+    target.write_bytes(
+        plistlib.dumps(
+            {"ProgramArguments": ["python", "renpho", "sync", "--latest", "--yes"]}
+        )
+    )
+    assert schedule.is_legacy()

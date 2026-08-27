@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from time import monotonic
@@ -47,6 +49,7 @@ class GarminAPI(Protocol):
     ) -> dict[str, Any]: ...
     def get_blood_pressure(self, startdate: str, enddate: str | None = None) -> dict[str, Any]: ...
     def get_activities_by_date(self, startdate: str, enddate: str) -> list[dict[str, Any]]: ...
+    def get_activities(self, start: int = 0, limit: int = 20) -> Any: ...
     def get_stats_and_body(self, cdate: str) -> dict[str, Any]: ...
     def get_sleep_data(self, cdate: str) -> dict[str, Any]: ...
     def get_training_readiness(self, cdate: str) -> list[dict[str, Any]]: ...
@@ -172,6 +175,50 @@ class GarminClient:
 
     def read_activities(self, startdate: str, enddate: str) -> list[dict[str, Any]]:
         return self._read(lambda api: api.get_activities_by_date(startdate, enddate), "activities")
+
+    def read_all_activities(self, *, page_size: int = 100) -> list[dict[str, Any]]:
+        api = self._connected_api()
+        result: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        seen_pages: set[str] = set()
+        start = 0
+        while True:
+            try:
+                response = api.get_activities(start, page_size)
+            except Exception as exc:
+                raise self._translate(exc, "Could not read all-time activities") from exc
+            page_value = (
+                response.get("activityList", []) if isinstance(response, dict) else response
+            )
+            page = (
+                [item for item in page_value if isinstance(item, dict)]
+                if isinstance(page_value, list)
+                else []
+            )
+            if not page:
+                break
+            signature = hashlib.sha256(
+                json.dumps(page, sort_keys=True, default=str).encode()
+            ).hexdigest()
+            if signature in seen_pages:
+                raise GarminSyncError("Garmin activity pagination did not advance")
+            seen_pages.add(signature)
+            new_items: list[dict[str, Any]] = []
+            for item in page:
+                activity_id = item.get("activityId")
+                if activity_id is not None:
+                    normalized_id = str(activity_id)
+                    if normalized_id in seen_ids:
+                        continue
+                    seen_ids.add(normalized_id)
+                new_items.append(item)
+            if not new_items:
+                raise GarminSyncError("Garmin activity pagination did not advance")
+            result.extend(new_items)
+            start += len(page)
+            if len(page) < page_size:
+                break
+        return result
 
     def read_blood_pressure(self, startdate: str, enddate: str) -> dict[str, Any]:
         return self._read(lambda api: api.get_blood_pressure(startdate, enddate), "blood pressure")

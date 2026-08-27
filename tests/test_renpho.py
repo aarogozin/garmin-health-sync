@@ -2,11 +2,14 @@ from datetime import datetime
 from typing import Any
 
 import pytest
+import requests
 
+from garmin_sync.activities import RenphoActivityTemplate
 from garmin_sync.models import BERLIN
 from garmin_sync.renpho import (
     RenphoCloud,
     RenphoError,
+    RenphoWriteUncertain,
     normalize_girth,
     normalize_measurement,
 )
@@ -91,6 +94,21 @@ def test_authentication_requires_credentials() -> None:
         RenphoCloud(Credentials(None), FakeAPI).authenticate()
 
 
+def test_authentication_adds_required_activity_headers() -> None:
+    class Session:
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
+    class Headers(FakeAPI):
+        def __init__(self, *_: Any, **__: Any) -> None:
+            super().__init__()
+            self._transport = type("Transport", (), {"session": Session()})()
+
+    api = RenphoCloud(Credentials(), Headers).authenticate()
+    assert api._transport.session.headers["language"] == "en"  # type: ignore[attr-defined]
+    assert api._transport.session.headers["timeZone"] == "Europe/Berlin"  # type: ignore[attr-defined]
+
+
 def test_epoch_is_converted_to_berlin() -> None:
     item = normalize_measurement({"timeStamp": 1_786_588_200, "weight": 80})
     assert isinstance(item.body.measured_at, datetime)
@@ -114,3 +132,75 @@ def test_normalize_girth_maps_available_body_parts_and_units() -> None:
         ("Left arm", 14.5, "in"),
         ("Waist-to-hip ratio", 0.84, "ratio"),
     ]
+
+
+def test_activity_templates_history_and_write_use_app_endpoints(monkeypatch) -> None:
+    class Activities(FakeAPI):
+        def __init__(self, *_: Any, **__: Any) -> None:
+            super().__init__()
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        def _post(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append((endpoint, body))
+            if endpoint.endswith("selectActivityTemplate"):
+                return {
+                    "code": 101,
+                    "data": {
+                        "list": [
+                            {"sportTypeId": 52, "sportName": "Running", "isOfficial": 0}
+                        ]
+                    },
+                }
+            if endpoint.endswith("getActivity"):
+                return {
+                    "code": 101,
+                    "data": {
+                        "list": [
+                            {
+                                "id": 7,
+                                "sportTypeId": 52,
+                                "recordTime": 1_776_000_000_000,
+                                "duration": 1800,
+                                "cal": 300,
+                            }
+                        ]
+                    },
+                }
+            return {"code": 101, "data": {"id": 8}}
+
+    monkeypatch.setattr("garmin_sync.renpho.encrypt_request", lambda value: value)
+    cloud = RenphoCloud(Credentials(), Activities)
+    assert cloud.fetch_activity_templates()[0] == RenphoActivityTemplate(52, "Running", 0)
+    assert cloud.fetch_activities()[0].calories == 300
+    template = cloud.fetch_activity_templates()[0]
+    assert (
+        cloud.create_activity(
+            template=template,
+            started_at=datetime(2026, 8, 22, tzinfo=BERLIN),
+            duration_seconds=1800,
+            calories=300,
+        )
+        == "8"
+    )
+    api = cloud.authenticate()
+    assert isinstance(api, Activities)
+    endpoint, payload = api.calls[-1]
+    assert endpoint.endswith("recordActivity")
+    assert payload["userId"] == "123"
+    assert payload["sportTypeId"] == 52
+
+
+def test_activity_write_timeout_is_uncertain(monkeypatch) -> None:
+    class Timeout(FakeAPI):
+        def _post(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
+            raise requests.Timeout("timeout")
+
+    monkeypatch.setattr("garmin_sync.renpho.encrypt_request", lambda value: value)
+    cloud = RenphoCloud(Credentials(), Timeout)
+    with pytest.raises(RenphoWriteUncertain):
+        cloud.create_activity(
+            template=RenphoActivityTemplate(52, "Running"),
+            started_at=datetime(2026, 8, 22, tzinfo=BERLIN),
+            duration_seconds=1800,
+            calories=300,
+        )
