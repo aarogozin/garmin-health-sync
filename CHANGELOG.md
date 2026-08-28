@@ -7,6 +7,8 @@ All notable changes to Garmin Health Sync are documented here. The project follo
 
 ### Fixed
 
+- Fixed chart SVGs being constrained to the global 20×20 icon size, which
+  made populated ECharts panels appear empty.
 - Dashboard snapshots are now queued automatically after startup instead of
   leaving every chart empty until a manual action succeeds. Background work is
   serialized in the Activity Center rather than rejected while startup loading
