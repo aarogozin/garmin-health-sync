@@ -1,24 +1,5 @@
 {
   "$defs": {
-    "ActivityPreviewRequest": {
-      "additionalProperties": false,
-      "properties": {
-        "period": {
-          "enum": [
-            "day",
-            "month",
-            "all"
-          ],
-          "title": "Period",
-          "type": "string"
-        }
-      },
-      "required": [
-        "period"
-      ],
-      "title": "ActivityPreviewRequest",
-      "type": "object"
-    },
     "ApiEnvelope": {
       "additionalProperties": false,
       "properties": {

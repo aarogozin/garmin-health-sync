@@ -27,7 +27,6 @@ from flask import (
 )
 from werkzeug.serving import BaseWSGIServer
 
-from .activities import ActivitySyncPreview, ActivitySyncResult
 from .garmin import GarminClient
 from .models import BloodPressure, ValidationError, local_now, parse_local_datetime
 from .renpho import RenphoCloud, RenphoMeasurement
@@ -123,9 +122,7 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
     startup_ready = threading.Event()
     app.extensions["garmin_sync_startup_ready"] = startup_ready
     previews: dict[str, RenphoPreview] = {}
-    activity_previews: dict[str, ActivitySyncPreview] = {}
     api_previews: dict[str, Any] = {}
-    api_activity_previews: dict[str, Any] = {}
     latest_renpho: list[LatestRenphoReport] = []
     latest_error: list[str] = []
     events: list[str] = []
@@ -220,7 +217,6 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
 <section><h2>Body measurements</h2><p>View your RENPHO waist, chest, arms, thighs, calves and other circumference measurements.</p><form method=post action=/renpho/history><input type=hidden name=csrf value="{{csrf}}"><button {{disabled}}>View body measurements</button></form></section>
 <section><h2>RENPHO → Garmin</h2><form method=post action=/renpho/preview><input type=hidden name=csrf value="{{csrf}}">
 <button name=mode value=latest {{disabled}}>Sync latest</button><button name=mode value=all {{disabled}}>Sync history</button></form></section>
-<section><h2>Garmin → RENPHO activities <span class=confidence>Experimental</span></h2><p>Copies activity type, start time, duration and calories. Routes, heart rate and distance remain in Garmin.</p><form method=post action=/activities/preview><input type=hidden name=csrf value="{{csrf}}"><button name=period value=day {{disabled}}>Last 24 hours</button><button name=period value=month {{disabled}}>Last 30 days</button><button name=period value=all {{disabled}}>All time</button></form></section>
 <section><h2>Weekly health report</h2><p>Training, recovery, blood pressure and body-composition trends for today and the previous six days, with 30 days of Lifestyle Logging context.</p><form method=post action=/weekly-report/generate><input type=hidden name=csrf value="{{csrf}}"><label><input type=checkbox name=include_routes value=yes> Include activity routes and location names (kept in memory only)</label><label><input type=checkbox name=map_tiles value=yes> Show OpenStreetMap background (sends tile area and IP to OpenStreetMap)</label><br><button {{disabled}}>Generate 7-day health report</button></form>{{weekly_links|safe}}</section>
 <section><h2>Run log</h2><div class=log>{{log}}</div></section>""",
                 csrf=token,
@@ -276,11 +272,6 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
     def renpho_preview() -> Any:
         mode = request.form.get("mode", "")
         return start(lambda: sync_service.preview_renpho(mode))
-
-    @app.post("/activities/preview")
-    def activity_preview() -> Any:
-        period = request.form.get("period", "")
-        return start(lambda: sync_service.preview_activities(period))
 
     @app.post("/renpho/latest")
     def renpho_latest() -> Any:
@@ -369,16 +360,6 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
             previews.pop(preview_id, None)
         return response
 
-    @app.post("/activities/sync/<preview_id>")
-    def activity_sync(preview_id: str) -> Any:
-        preview = activity_previews.get(preview_id)
-        if preview is None:
-            abort(404)
-        response = start(lambda: sync_service.sync_activities(preview))
-        if not isinstance(response, Response) or response.status_code != 409:
-            activity_previews.pop(preview_id, None)
-        return response
-
     @app.get("/jobs/<job_id>")
     def job_status(job_id: str) -> str | Response:
         job = jobs.jobs.get(job_id)
@@ -448,49 +429,6 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
             return page(
                 f"<section><h2>Confirm RENPHO sync</h2><p>Measurements: {result.count}<br>Range: {_escape(str(first))} – {_escape(str(last))}</p><form method=post action=/renpho/sync/{preview_id}><input type=hidden name=csrf value='{token}'><button>Sync to Garmin</button></form><a href='/'>Cancel</a></section>"
             )
-        if isinstance(result, ActivitySyncPreview):
-            preview_id = uuid.uuid4().hex
-            activity_previews[preview_id] = result
-            rows = "".join(
-                "<tr>"
-                f"<td>{_escape(item.activity.started_at.strftime('%Y-%m-%d %H:%M'))}</td>"
-                f"<td>{_escape(item.activity.name)}</td>"
-                f"<td>{_escape(item.template.name)}</td>"
-                f"<td>{item.activity.duration_seconds // 60} min</td>"
-                f"<td>{item.activity.calories} kcal"
-                f"{' (missing in Garmin)' if item.activity.calories_missing else ''}</td>"
-                "</tr>"
-                for item in result.candidates
-            )
-            unknown = "".join(
-                f"<li>{_escape(item.activity_type)} — {_escape(item.name)}</li>"
-                for item in result.unknown
-            )
-            summary = (
-                f"<p>Candidates: {result.count}; existing duplicates: "
-                f"{result.duplicate_count}; invalid: {result.invalid_count}; "
-                f"unknown types: {len(result.unknown)}.</p>"
-            )
-            if not result.candidates:
-                activity_previews.pop(preview_id, None)
-                return page(
-                    "<section><h2>No Garmin activities to sync</h2>"
-                    + summary
-                    + (f"<h3>Skipped unknown types</h3><ul>{unknown}</ul>" if unknown else "")
-                    + "<a href='/'>Home</a></section>"
-                )
-            return page(
-                "<section><h2>Confirm Garmin → RENPHO activity sync</h2>"
-                "<p class=caution>This uses an unofficial RENPHO endpoint.</p>"
-                + summary
-                + "<table><tr><th>Start</th><th>Garmin</th><th>RENPHO mapping</th>"
-                f"<th>Duration</th><th>Calories</th></tr>{rows}</table>"
-                + (f"<h3>Skipped unknown types</h3><ul>{unknown}</ul>" if unknown else "")
-                + f"<form method=post action=/activities/sync/{preview_id}>"
-                f"<input type=hidden name=csrf value='{_escape(token)}'>"
-                "<button>Sync activities to RENPHO</button></form>"
-                "<a href='/'>Cancel</a></section>"
-            )
         if isinstance(result, LatestRenphoReport):
             latest_renpho[:] = [result]
             latest_error.clear()
@@ -547,13 +485,11 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
         for item in results:
             if isinstance(item, OperationResult):
                 events.append(f"{item.status.value}: {item.message}")
-            elif isinstance(item, ActivitySyncResult):
-                events.append(f"Activity sync {item.status}")
         content = "".join(
-            f"<li class='{item.status.value if isinstance(item, OperationResult) else item.status}'>"
+            f"<li class='{item.status.value}'>"
             f"{_escape(item.message)}</li>"
             for item in results
-            if isinstance(item, (OperationResult, ActivitySyncResult))
+            if isinstance(item, OperationResult)
         )
         return page(
             f"<section><h2>Result</h2><ul>{content}</ul><a href='/'>Home</a></section>"
@@ -598,7 +534,6 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
             weekly_reports=weekly_reports,
             latest_weekly_id=latest_weekly_id,
             previews=api_previews,
-            activity_previews=api_activity_previews,
             events=events,
             garmin_status=garmin_status,
             garmin_profile=garmin_profile,

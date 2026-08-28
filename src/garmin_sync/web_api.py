@@ -13,9 +13,7 @@ from flask import Blueprint, Response, jsonify, request
 from pydantic import ValidationError as PydanticValidationError
 
 from . import __version__, schedule
-from .activities import ActivitySyncPreview, ActivitySyncResult
 from .api_models import (
-    ActivityPreviewRequest,
     DashboardRefreshRequest,
     GarminLoginRequest,
     MfaRequest,
@@ -57,7 +55,7 @@ class MfaBroker:
 
 @dataclass(slots=True)
 class StoredPreview:
-    value: RenphoPreview | ActivitySyncPreview
+    value: RenphoPreview
     expires_at: float
     state: str = "available"
 
@@ -79,7 +77,6 @@ class WebApiState:
     weekly_reports: dict[str, WeeklyReportResult]
     latest_weekly_id: list[str]
     previews: dict[str, StoredPreview]
-    activity_previews: dict[str, StoredPreview]
     events: list[str]
     garmin_status: list[OperationResult]
     garmin_profile: list[GarminProfile] = field(default_factory=list)
@@ -124,7 +121,7 @@ def register_api(app: Any, state: WebApiState) -> None:
 
     def _claim_preview(
         previews: dict[str, StoredPreview], preview_id: str
-    ) -> RenphoPreview | ActivitySyncPreview | Response:
+    ) -> RenphoPreview | Response:
         stored = previews.get(preview_id)
         if stored is None:
             return envelope("not_found", code=404, error="Sync preview is unavailable")
@@ -408,25 +405,6 @@ def register_api(app: Any, state: WebApiState) -> None:
             state.previews[preview_id].state = "available"
         return response
 
-    @api.post("/activities/preview")
-    def activity_preview() -> Response:
-        payload = parse(ActivityPreviewRequest)
-        return start(
-            lambda: state.service.preview_activities(payload.period), kind="activity-preview"
-        )
-
-    @api.post("/activities/sync/<preview_id>")
-    def activities_sync(preview_id: str) -> Response:
-        preview = _claim_preview(state.activity_previews, preview_id)
-        if isinstance(preview, Response):
-            return preview
-        response = start(lambda: state.service.sync_activities(preview), kind="activity-sync")
-        if response.status_code == 202:
-            state.activity_previews[preview_id].state = "consumed"
-        else:
-            state.activity_previews[preview_id].state = "available"
-        return response
-
     @api.post("/reports/weekly")
     def weekly_generate() -> Response:
         payload = parse(WeeklyReportRequest)
@@ -617,29 +595,6 @@ def _consume_result(result: Any, state: WebApiState) -> dict[str, Any] | list[An
                 for item in result.candidates
             ],
         }
-    if isinstance(result, ActivitySyncPreview):
-        preview_id = secrets.token_urlsafe(18)
-        state.activity_previews[preview_id] = StoredPreview(result, monotonic() + 600)
-        return {
-            "type": "activity_preview",
-            "preview_id": preview_id,
-            "period": result.period,
-            "count": result.count,
-            "duplicate_count": result.duplicate_count,
-            "invalid_count": result.invalid_count,
-            "unknown": [{"name": item.name, "type": item.activity_type} for item in result.unknown],
-            "candidates": [
-                {
-                    "name": item.activity.name,
-                    "started_at": item.activity.started_at.isoformat(),
-                    "mapping": item.template.name,
-                    "duration_minutes": item.activity.duration_seconds // 60,
-                    "calories": item.activity.calories,
-                    "calories_missing": item.activity.calories_missing,
-                }
-                for item in result.candidates
-            ],
-        }
     if isinstance(result, LatestRenphoReport):
         state.latest_renpho[:] = [result]
         state.latest_error.clear()
@@ -683,19 +638,19 @@ def _consume_result(result: Any, state: WebApiState) -> dict[str, Any] | list[An
     if isinstance(result, list):
         return [
             {
-                "type": "operation" if isinstance(item, OperationResult) else "activity_sync",
-                "status": item.status.value if isinstance(item, OperationResult) else item.status,
+                "type": "operation",
+                "status": item.status.value,
                 "message": item.message,
             }
             for item in result
-            if isinstance(item, (OperationResult, ActivitySyncResult))
+            if isinstance(item, OperationResult)
         ]
     return {"type": "unknown", "message": "Operation completed"}
 
 
 def _terminal_state(result: Any) -> str:
     """Reflect the business outcome instead of treating a completed Future as success."""
-    if isinstance(result, (RenphoPreview, ActivitySyncPreview, LatestRenphoReport, RenphoHistory)):
+    if isinstance(result, (RenphoPreview, LatestRenphoReport, RenphoHistory)):
         return "verified"
     if isinstance(result, WeeklyReportResult):
         return "verified" if result.status == ResultStatus.SUCCESS else result.status.value
@@ -704,9 +659,9 @@ def _terminal_state(result: Any) -> str:
         statuses = [result.status.value]
     elif isinstance(result, list):
         statuses = [
-            item.status.value if isinstance(item, OperationResult) else item.status
+            item.status.value
             for item in result
-            if isinstance(item, (OperationResult, ActivitySyncResult))
+            if isinstance(item, OperationResult)
         ]
     if not statuses:
         return "verified"

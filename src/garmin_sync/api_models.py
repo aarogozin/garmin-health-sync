@@ -37,10 +37,6 @@ class SyncPreviewRequest(ApiModel):
     mode: Literal["latest", "all"]
 
 
-class ActivityPreviewRequest(ApiModel):
-    period: Literal["day", "month", "all"]
-
-
 class WeeklyReportRequest(ApiModel):
     include_routes: bool = False
     map_tiles_enabled: bool = False
@@ -73,7 +69,6 @@ def exported_schema() -> dict[str, Any]:
         RenphoLoginRequest,
         PressureRequest,
         SyncPreviewRequest,
-        ActivityPreviewRequest,
         WeeklyReportRequest,
         DashboardRefreshRequest,
         ScheduleRequest,

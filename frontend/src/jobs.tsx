@@ -93,7 +93,6 @@ function JobResult({ result, start }: { result: any; start: JobsContextValue['st
   if (!result) return null
   if (result.type === 'operation') return <p className={`result result--${result.status}`}>{result.message}</p>
   if (result.type === 'renpho_preview') return <div className="result"><b>{result.count} measurement(s) ready</b><span>{result.skipped} skipped</span>{result.count > 0 && <button className="button button--primary" onClick={() => void start(`/renpho/sync/${result.preview_id}`)}>Confirm sync</button>}</div>
-  if (result.type === 'activity_preview') return <div className="result"><b>{result.count} activities ready</b><span>{result.duplicate_count} duplicates · {result.unknown.length} unknown</span>{result.count > 0 && <button className="button button--primary" onClick={() => void start(`/activities/sync/${result.preview_id}`)}>Confirm import</button>}</div>
   if (result.type === 'weekly_report') return <div className="result"><b>Weekly report ready</b><a className="text-link" href={`/reports/weekly/${result.id}`}>Open report</a></div>
   if (Array.isArray(result)) return <div className="result"><b>{result.length} result(s)</b><span>{result.filter((item) => item.status === 'success').length} verified</span></div>
   return null

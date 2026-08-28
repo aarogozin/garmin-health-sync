@@ -16,7 +16,6 @@ _Anonymized product preview; the application does not ship or persist these samp
 ## What it does
 
 - Uploads RENPHO weight and compatible body-composition metrics to Garmin Connect.
-- Experimentally copies Garmin activity summaries to RENPHO (type, start time, duration and calories).
 - Adds manual blood-pressure readings with exact duplicate detection.
 - Shows RENPHO body-composition and circumference history.
 - Produces an English web/PDF weekly report with activities, sleep, HR/HRV, stress, Body Battery, readiness, blood pressure, weight and other available Garmin domains.
@@ -55,13 +54,7 @@ uv run garmin-sync renpho sync --all
 uv run garmin-sync renpho sync --latest --yes
 uv run garmin-sync renpho logout
 
-# Experimental Garmin → RENPHO activity summaries
-uv run garmin-sync activities preview --period day
-uv run garmin-sync activities sync --period day
-uv run garmin-sync activities sync --period month
-uv run garmin-sync activities sync --period all
-
-# Both directions: latest RENPHO weight and the last 24h of Garmin activities
+# Latest RENPHO weight → Garmin
 uv run garmin-sync sync daily
 
 # Local web dashboard
@@ -178,7 +171,7 @@ uv run garmin-sync schedule run
 uv run garmin-sync schedule uninstall
 ```
 
-The job uploads the latest unsynchronized RENPHO measurement to Garmin, then copies mapped Garmin activities from the rolling previous 24 hours to RENPHO. Re-run `schedule install` after upgrading from a weight-only schedule. Its sanitized operational log is at `~/Library/Logs/GarminHealthSync/renpho-sync.log`. Duplicate state is stored with mode `0600` at `~/Library/Application Support/garmin-health-sync/state.json`; Garmin activity IDs are stored only as hashes and no activity values are persisted.
+The job uploads the latest unsynchronized RENPHO measurement to Garmin. Its sanitized operational log is at `~/Library/Logs/GarminHealthSync/renpho-sync.log`. Duplicate state is stored with mode `0600` at `~/Library/Application Support/garmin-health-sync/state.json`.
 
 ## Data behavior
 
@@ -188,8 +181,6 @@ The job uploads the latest unsynchronized RENPHO measurement to Garmin, then cop
 - RENPHO muscle and bone percentages are converted to kilograms. Metabolic age is displayed but not sent because Garmin FIT import corrupts that field.
 - Blood-pressure duplicates match UTC timestamp, systolic, diastolic and pulse before any POST and are verified after a write.
 - A network failure or ambiguous response never triggers an automatic write retry.
-- Garmin → RENPHO is experimental and uses an undocumented endpoint. Unknown activity types are skipped; RENPHO receives only the mapped type, start time, duration and integer calories.
-- Imported summaries appear in RENPHO's manual activity area (`Quick Log` / `Activity Management`), not in device workout history. The exact label may vary by RENPHO app version.
 
 ## Security model
 

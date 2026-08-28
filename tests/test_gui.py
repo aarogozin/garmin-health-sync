@@ -8,12 +8,6 @@ from typing import Any
 import pytest
 
 import garmin_sync.web_api as web_api
-from garmin_sync.activities import (
-    ActivitySyncCandidate,
-    ActivitySyncPreview,
-    GarminActivity,
-    RenphoActivityTemplate,
-)
 from garmin_sync.body_report import ReportDocument
 from garmin_sync.gui import JobManager, create_app
 from garmin_sync.models import BERLIN, BodyComposition
@@ -45,26 +39,6 @@ class FakeService:
         raise RuntimeError("not used")
 
     def sync_renpho(self, preview: Any) -> list[OperationResult]:
-        return []
-
-    def preview_activities(self, period: str) -> ActivitySyncPreview:
-        activity = GarminActivity(
-            "42",
-            "running",
-            "<Morning Run>",
-            datetime(2026, 8, 15, 8, 0, tzinfo=BERLIN),
-            1800,
-            300,
-        )
-        return ActivitySyncPreview(
-            period,
-            (ActivitySyncCandidate(activity, RenphoActivityTemplate(52, "Running")),),
-            (),
-            0,
-            0,
-        )
-
-    def sync_activities(self, preview: Any) -> list[Any]:
         return []
 
     def latest_report(self) -> LatestRenphoReport:
@@ -289,12 +263,6 @@ def test_v1_jobs_serialize_latest_history_activity_and_weekly_report() -> None:
     assert history["result"]["type"] == "renpho_history"
     assert history["result"]["girth"][0]["values"][0]["label"] == "Waist"
 
-    activities = _start_api_job(
-        client, "/api/v1/activities/preview", {"period": "day"}
-    )
-    assert activities["result"]["type"] == "activity_preview"
-    assert activities["result"]["candidates"][0]["name"] == "<Morning Run>"
-
     weekly = _start_api_job(client, "/api/v1/reports/weekly")
     assert weekly["result"]["type"] == "weekly_report"
     report_id = weekly["result"]["id"]
@@ -426,25 +394,6 @@ def test_mutating_routes_reject_get() -> None:
     client = app.test_client()
     assert client.get("/status", headers={"Host": "127.0.0.1"}).status_code == 405
     assert client.get("/pressure/submit", headers={"Host": "127.0.0.1"}).status_code == 405
-    assert client.get("/activities/preview", headers={"Host": "127.0.0.1"}).status_code == 405
-
-
-def test_activity_preview_is_csrf_protected_and_escaped() -> None:
-    app = create_app(FakeService(), "test-token")  # type: ignore[arg-type]
-    assert app.extensions["garmin_sync_startup_ready"].wait(timeout=2)
-    client = app.test_client()
-    assert client.post("/activities/preview", headers={"Host": "127.0.0.1"}).status_code == 403
-    started = client.post(
-        "/activities/preview",
-        data={"csrf": "test-token", "period": "day"},
-        headers={"Host": "127.0.0.1"},
-    )
-    result = client.get(started.headers["Location"], headers={"Host": "127.0.0.1"})
-    assert "Confirm Garmin → RENPHO activity sync" in result.text
-    assert "&lt;Morning Run&gt;" in result.text
-    assert "<Morning Run>" not in result.text
-
-
 def test_pressure_confirmation_escapes_notes() -> None:
     app = create_app(FakeService(), "test-token")  # type: ignore[arg-type]
     response = app.test_client().post(

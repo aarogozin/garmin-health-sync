@@ -49,18 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--all", dest="sync_mode", action="store_const", const="all")
     sync.add_argument("--yes", action="store_true", help="run without an interactive confirmation")
     sync.set_defaults(sync_mode="latest")
-    activities = sub.add_parser(
-        "activities", help="experimentally sync Garmin activities to RENPHO"
-    )
-    activities_sub = activities.add_subparsers(dest="activities_command", required=True)
-    for action in ("preview", "sync"):
-        activity_action = activities_sub.add_parser(action)
-        activity_action.add_argument("--period", choices=("day", "month", "all"), default="day")
-        if action == "sync":
-            activity_action.add_argument("--yes", action="store_true")
-    combined = sub.add_parser("sync", help="run combined synchronization jobs")
+    combined = sub.add_parser("sync", help="run synchronization jobs")
     combined_sub = combined.add_subparsers(dest="sync_command", required=True)
-    combined_sub.add_parser("daily", help="sync latest weight and the last 24h of activities")
+    combined_sub.add_parser("daily", help="sync the latest RENPHO measurement to Garmin")
     schedule = sub.add_parser("schedule", help="manage daily RENPHO sync with macOS launchd")
     schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
     install = schedule_sub.add_parser("install", help="install or update the daily schedule")
@@ -91,10 +82,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "renpho":
             return renpho_command(args, client, renpho_store)
-        if args.command == "activities":
-            return activities_command(
-                args, HealthSyncService(client, RenphoCloud(renpho_store), SyncState())
-            )
         if args.command == "sync":
             return daily_sync(client, RenphoCloud(renpho_store), SyncState())
         if args.command == "gui":
@@ -118,51 +105,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2 if not isinstance(exc, UploadUncertain) else 3
 
 
-def activities_command(
-    args: argparse.Namespace,
-    service: HealthSyncService,
-    input_fn: Input = input,
-) -> int:
-    preview = service.preview_activities(args.period)
-    _print_activity_preview(preview)
-    if args.activities_command == "preview" or not preview.candidates:
-        return 0
-    if not args.yes and not _confirm("Upload these activities to RENPHO? [y/N]: ", input_fn):
-        print("Cancelled; nothing was uploaded.")
-        return 0
-    results = service.sync_activities(preview)
-    failed = False
-    uncertain = False
-    for index, result in enumerate(results, start=1):
-        print(f"{index}/{preview.count} {result.status}: {result.message}")
-        failed |= result.status == ResultStatus.ERROR.value
-        uncertain |= result.status == ResultStatus.UNCERTAIN.value
-    return 3 if uncertain else (2 if failed else 0)
-
-
-def _print_activity_preview(preview: object) -> None:
-    from .activities import ActivitySyncPreview
-
-    if not isinstance(preview, ActivitySyncPreview):
-        return
-    print(
-        f"Garmin → RENPHO preview ({preview.period}): {preview.count} candidate(s), "
-        f"{preview.duplicate_count} duplicate(s), {len(preview.unknown)} unknown type(s), "
-        f"{preview.invalid_count} invalid record(s)."
-    )
-    for item in preview.candidates:
-        activity = item.activity
-        warning = " (calories unavailable; using 0)" if activity.calories_missing else ""
-        print(
-            f"  {activity.started_at.isoformat(timespec='minutes')} {activity.name} → "
-            f"{item.template.name}, {activity.duration_seconds}s, {activity.calories} kcal{warning}"
-        )
-    for unknown_item in preview.unknown:
-        print(
-            f"  skipped unknown type: {unknown_item.activity_type} ({unknown_item.name})"
-        )
-
-
 def daily_sync(garmin: GarminClient, cloud: RenphoCloud, state: SyncState) -> int:
     service = HealthSyncService(garmin, cloud, state)
     exit_code = 0
@@ -176,26 +118,6 @@ def daily_sync(garmin: GarminClient, cloud: RenphoCloud, state: SyncState) -> in
         print(f"  error: {exc}", file=sys.stderr)
         exit_code = max(exit_code, 2)
 
-    print("Daily sync: Garmin activities (last 24h) → RENPHO")
-    try:
-        preview = service.preview_activities("day")
-        print(
-            f"  candidates: {preview.count}; duplicates: {preview.duplicate_count}; "
-            f"unknown: {len(preview.unknown)}; invalid: {preview.invalid_count}"
-        )
-        for index, activity_result in enumerate(service.sync_activities(preview), start=1):
-            print(f"  activity {index}: {activity_result.status}")
-            if activity_result.status in {
-                ResultStatus.ERROR.value,
-                ResultStatus.UNCERTAIN.value,
-            }:
-                exit_code = max(
-                    exit_code,
-                    3 if activity_result.status == ResultStatus.UNCERTAIN.value else 2,
-                )
-    except (GarminSyncError, RenphoError, SyncStateError, SyncBusyError) as exc:
-        print(f"  error: {exc}", file=sys.stderr)
-        exit_code = max(exit_code, 2)
     return exit_code
 
 

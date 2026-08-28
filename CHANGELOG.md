@@ -3,6 +3,20 @@
 All notable changes to Garmin Health Sync are documented here. The project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Removed
+
+- The unsupported experimental Garmin-to-RENPHO activity-summary integration,
+  including its CLI commands, web API routes, Sync Center controls, scheduler
+  direction and local synchronization state. Garmin activities remain available
+  read-only in the dashboard and reports.
+
+### Changed
+
+- The daily LaunchAgent now performs only the verified RENPHO body-composition
+  upload to Garmin.
+
 ## [1.0.0] - 2026-08-27
 
 ### Added

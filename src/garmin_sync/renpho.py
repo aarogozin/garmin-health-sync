@@ -12,7 +12,6 @@ from renpho import RenphoAPIError
 from renpho import RenphoClient as CloudClient
 from renpho.crypto import decrypt_response, encrypt_request
 
-from .activities import RenphoActivityRecord, RenphoActivityTemplate
 from .models import BERLIN, BodyComposition, ValidationError
 from .renpho_report import RenphoReportData, normalize_report
 
@@ -21,10 +20,6 @@ T = TypeVar("T")
 
 class RenphoError(RuntimeError):
     """Safe user-facing RENPHO integration error."""
-
-
-class RenphoWriteUncertain(RenphoError):
-    """RENPHO may have accepted a write, so it must not be retried automatically."""
 
 
 class RenphoCredentials(Protocol):
@@ -129,118 +124,6 @@ class RenphoCloud:
             raise RenphoError("RENPHO login failed") from exc
         self._api = api
         return api
-
-    def fetch_activity_templates(self) -> tuple[RenphoActivityTemplate, ...]:
-        raw = self._activity_call(
-            "RenphoHealth/healthManage/selectActivityTemplate", {}, write=False
-        )
-        templates: list[RenphoActivityTemplate] = []
-        for item in _activity_items(raw):
-            template_id = _first_int(item, "sportTypeId", "id", "activityId")
-            name = _first_text(item, "title", "sportName", "name", "activityName")
-            if template_id is not None and name:
-                official = _first_int(item, "isOfficial")
-                templates.append(
-                    RenphoActivityTemplate(template_id, name, 1 if official is None else official)
-                )
-        if not templates:
-            raise RenphoError("RENPHO returned no readable activity templates")
-        return tuple(templates)
-
-    def fetch_activities(self) -> tuple[RenphoActivityRecord, ...]:
-        raw = self._activity_call("RenphoHealth/healthManage/getActivity", {}, write=False)
-        records: list[RenphoActivityRecord] = []
-        for item in _activity_items(raw):
-            template_id = _first_int(item, "sportTypeId", "activityId")
-            record_time = _first_int(item, "recordTime", "timeStamp")
-            duration = _first_int(item, "duration")
-            calories = _first_int(item, "cal", "calories")
-            if (
-                template_id is None
-                or record_time is None
-                or duration is None
-                or calories is None
-            ):
-                continue
-            seconds = record_time / 1000 if record_time > 10_000_000_000 else record_time
-            records.append(
-                RenphoActivityRecord(
-                    _first_text(item, "id", "recordId"),
-                    template_id,
-                    datetime.fromtimestamp(seconds, tz=BERLIN),
-                    duration,
-                    calories,
-                )
-            )
-        return tuple(records)
-
-    def create_activity(
-        self,
-        *,
-        template: RenphoActivityTemplate,
-        started_at: datetime,
-        duration_seconds: int,
-        calories: int,
-    ) -> str | None:
-        raw = self._activity_call(
-            "RenphoHealth/healthManage/recordActivity",
-            {
-                "duration": duration_seconds,
-                "sportTypeId": template.template_id,
-                "isOfficial": template.is_official,
-                "cal": calories,
-                "recordTime": int(started_at.timestamp() * 1000),
-            },
-            write=True,
-        )
-        return _first_text(raw, "id", "recordId") if isinstance(raw, dict) else None
-
-    def _activity_call(self, endpoint: str, payload: dict[str, Any], *, write: bool) -> Any:
-        if write:
-            return self._activity_call_with_api(self.authenticate(), endpoint, payload, write=True)
-        return self._read_with_reauth(
-            lambda api: self._activity_call_with_api(api, endpoint, payload, write=False),
-            "RENPHO rejected the refreshed activity session",
-        )
-
-    def _activity_call_with_api(
-        self, api: RenphoAPI, endpoint: str, payload: dict[str, Any], *, write: bool
-    ) -> Any:
-        if api.user_id is None:
-            raise RenphoError("RENPHO login returned no user identifier")
-        body = {"userId": str(api.user_id), **payload}
-        try:
-            response = api._post(endpoint, encrypt_request(body))
-            code = response.get("code") if isinstance(response, dict) else None
-            if code not in {None, 101, "101"}:
-                raise RenphoError("RENPHO rejected the activity request")
-            data = response.get("data") if isinstance(response, dict) else None
-            if isinstance(data, str):
-                return decrypt_response(data)
-            return data if data is not None else response
-        except RenphoAPIError:
-            raise
-        except RenphoError:
-            raise
-        except requests.RequestException as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-            if not write and status in {401, 403}:
-                raise
-            if status in {401, 403}:
-                raise RenphoError("RENPHO rejected the saved credentials") from exc
-            if status == 429:
-                raise RenphoError("RENPHO rate-limited the request; wait before retrying") from exc
-            if write:
-                raise RenphoWriteUncertain(
-                    "RENPHO activity upload may have succeeded; check RENPHO before retrying"
-                ) from exc
-            raise RenphoError("Could not read RENPHO activities") from exc
-        except Exception as exc:
-            if write:
-                raise RenphoWriteUncertain(
-                    "RENPHO returned an unreadable upload response; check RENPHO before retrying"
-                ) from exc
-            raise RenphoError("RENPHO returned unreadable activity data") from exc
 
     def fetch(self) -> tuple[list[RenphoMeasurement], int]:
         raw_items = self._fetch_measurements()
@@ -358,30 +241,6 @@ def normalize_measurement(raw: dict[str, Any]) -> RenphoMeasurement:
     raw_id = raw.get("id")
     source_id = str(raw_id) if raw_id is not None else _stable_id(raw, body)
     return RenphoMeasurement(source_id, body, normalize_report(raw, measured_at))
-
-
-def _activity_items(value: Any) -> list[dict[str, Any]]:
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, dict)]
-    if not isinstance(value, dict):
-        return []
-    for key in ("list", "records", "activityList", "data", "rows"):
-        nested = value.get(key)
-        if isinstance(nested, list):
-            return [item for item in nested if isinstance(item, dict)]
-    return []
-
-
-def _first_int(raw: dict[str, Any], *keys: str) -> int | None:
-    for key in keys:
-        value = raw.get(key)
-        if isinstance(value, bool) or value is None:
-            continue
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            continue
-    return None
 
 
 def _first_text(raw: dict[str, Any], *keys: str) -> str | None:

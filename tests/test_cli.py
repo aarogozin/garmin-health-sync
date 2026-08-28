@@ -3,20 +3,11 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from garmin_sync.activities import (
-    ActivitySyncCandidate,
-    ActivitySyncPreview,
-    ActivitySyncResult,
-    GarminActivity,
-    RenphoActivityTemplate,
-)
 from garmin_sync.cli import (
     _choice,
     _confirm,
     _float_prompt,
     _int_prompt,
-    _print_activity_preview,
-    activities_command,
     add_command,
     body_wizard,
     daily_sync,
@@ -139,7 +130,7 @@ def test_renpho_all_keeps_only_latest_measurement_per_day(tmp_path) -> None:
     assert [item.weight for item in garmin.uploaded] == [79]
 
 
-def test_daily_sync_runs_activity_direction_after_weight_failure(monkeypatch, tmp_path) -> None:
+def test_daily_sync_stops_after_weight_failure(monkeypatch, tmp_path) -> None:
     calls: list[str] = []
 
     class DailyService:
@@ -153,17 +144,10 @@ def test_daily_sync_runs_activity_direction_after_weight_failure(monkeypatch, tm
         def sync_renpho(self, preview):
             raise AssertionError("weight sync should not run")
 
-        def preview_activities(self, period: str) -> ActivitySyncPreview:
-            calls.append("activities")
-            return ActivitySyncPreview(period, (), (), 0, 0)
-
-        def sync_activities(self, preview: ActivitySyncPreview):
-            return []
-
     monkeypatch.setattr("garmin_sync.cli.HealthSyncService", DailyService)
     result = daily_sync(object(), object(), SyncState(tmp_path / "state.json"))  # type: ignore[arg-type]
     assert result == 2
-    assert calls == ["weight", "activities"]
+    assert calls == ["weight"]
 
 
 def test_daily_sync_output_excludes_health_values(monkeypatch, tmp_path, capsys) -> None:
@@ -180,33 +164,6 @@ def test_daily_sync_output_excludes_health_values(monkeypatch, tmp_path, capsys)
         def sync_renpho(self, preview):
             return [OperationResult(ResultStatus.SUCCESS, f"{secret_date}: uploaded")]
 
-        def preview_activities(self, period: str) -> ActivitySyncPreview:
-            preview = activity_preview()
-            private = GarminActivity(
-                "private-id",
-                "running",
-                secret_name,
-                datetime(2026, 8, 22, 22, 30, tzinfo=BERLIN),
-                3600,
-                700,
-            )
-            return ActivitySyncPreview(
-                period,
-                (ActivitySyncCandidate(private, RenphoActivityTemplate(52, "Running")),),
-                preview.unknown,
-                preview.invalid_count,
-                preview.duplicate_count,
-            )
-
-        def sync_activities(self, preview: ActivitySyncPreview):
-            return [
-                ActivitySyncResult(
-                    ResultStatus.SUCCESS.value,
-                    "private-id",
-                    f"{secret_name}: uploaded and verified",
-                )
-            ]
-
     monkeypatch.setattr("garmin_sync.cli.HealthSyncService", DailyService)
     assert daily_sync(object(), object(), SyncState(tmp_path / "state.json")) == 0  # type: ignore[arg-type]
     output = capsys.readouterr().out
@@ -215,7 +172,6 @@ def test_daily_sync_output_excludes_health_values(monkeypatch, tmp_path, capsys)
     assert "700" not in output
     assert "3600" not in output
     assert "weight sync: success" in output
-    assert "activity 1: success" in output
 
 
 def test_numeric_prompts_retry_invalid_values(capsys) -> None:
@@ -303,71 +259,6 @@ def test_logout_confirmation_and_missing_session(capsys) -> None:
     assert logout_command(store, answers(["yes"])) == 0  # type: ignore[arg-type]
     assert store.calls == 1
     assert "No saved session was found." in capsys.readouterr().out
-
-
-def activity_preview() -> ActivitySyncPreview:
-    activity = GarminActivity(
-        "1",
-        "running",
-        "Morning Run",
-        datetime(2026, 8, 22, 8, 0, tzinfo=BERLIN),
-        1800,
-        0,
-        calories_missing=True,
-    )
-    unknown = GarminActivity("2", "other", "Other", activity.started_at, 600, 50)
-    return ActivitySyncPreview(
-        "day",
-        (ActivitySyncCandidate(activity, RenphoActivityTemplate(52, "Running")),),
-        (unknown,),
-        1,
-        2,
-    )
-
-
-class ActivityService:
-    def __init__(self, results: list[ActivitySyncResult]) -> None:
-        self.results = results
-        self.synced = False
-
-    def preview_activities(self, period: str) -> ActivitySyncPreview:
-        assert period == "day"
-        return activity_preview()
-
-    def sync_activities(self, preview: ActivitySyncPreview) -> list[ActivitySyncResult]:
-        self.synced = True
-        return self.results
-
-
-@pytest.mark.parametrize(
-    "status,expected",
-    [
-        (ResultStatus.SUCCESS.value, 0),
-        (ResultStatus.ERROR.value, 2),
-        (ResultStatus.UNCERTAIN.value, 3),
-    ],
-)
-def test_activity_sync_exit_codes(status: str, expected: int, capsys) -> None:
-    service = ActivityService([ActivitySyncResult(status, "1", "result")])
-    args = argparse.Namespace(period="day", activities_command="sync", yes=True)
-    assert activities_command(args, service) == expected  # type: ignore[arg-type]
-    assert service.synced
-    output = capsys.readouterr().out
-    assert "calories unavailable; using 0" in output
-    assert "skipped unknown type: other (Other)" in output
-
-
-def test_activity_preview_and_cancel_do_not_write(capsys) -> None:
-    service = ActivityService([])
-    preview_args = argparse.Namespace(period="day", activities_command="preview", yes=False)
-    assert activities_command(preview_args, service) == 0  # type: ignore[arg-type]
-    assert not service.synced
-
-    sync_args = argparse.Namespace(period="day", activities_command="sync", yes=False)
-    assert activities_command(sync_args, service, answers(["no"])) == 0  # type: ignore[arg-type]
-    assert not service.synced
-    assert "Cancelled; nothing was uploaded." in capsys.readouterr().out
-    _print_activity_preview(object())
 
 
 def test_renpho_sync_empty_and_uncertain_results(monkeypatch, tmp_path, capsys) -> None:
