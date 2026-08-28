@@ -5,6 +5,13 @@ All notable changes to Garmin Health Sync are documented here. The project follo
 
 ## Unreleased
 
+### Fixed
+
+- Dashboard snapshots are now queued automatically after startup instead of
+  leaving every chart empty until a manual action succeeds. Background work is
+  serialized in the Activity Center rather than rejected while startup loading
+  is still in progress.
+
 ### Removed
 
 - The unsupported experimental Garmin-to-RENPHO activity-summary integration,

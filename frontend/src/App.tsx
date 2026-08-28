@@ -1,10 +1,10 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api, setCsrfToken } from './api'
 import { Layout } from './components/Layout'
 import { LoadingScreen } from './components/Common'
-import { JobsProvider } from './jobs'
+import { JobsProvider, useJobs } from './jobs'
 import { Onboarding } from './pages/Onboarding'
 import { applyTheme, THEME_STORAGE_KEY, type Theme } from './theme'
 import type { Bootstrap } from './types'
@@ -25,5 +25,17 @@ export function App() {
   useEffect(() => { if (data?.csrf_token) setCsrfToken(data.csrf_token) }, [data?.csrf_token])
   if (isLoading) return <LoadingScreen />
   if (error || !data) return <main className="startup"><h1>Local server unavailable</h1><p>{error instanceof Error ? error.message : 'Could not load application state.'}</p></main>
-  return <JobsProvider>{!data.sources.garmin.connected && !explore ? <Onboarding bootstrap={data} onExplore={() => setExplore(true)} /> : <Layout bootstrap={data}><Suspense fallback={<LoadingScreen />}><Routes><Route path="/" element={<Navigate to="/overview" replace />} /><Route path="/overview" element={<Overview />} /><Route path="/training" element={<DomainPage domain="training" />} /><Route path="/recovery" element={<DomainPage domain="recovery" />} /><Route path="/body" element={<BodyPage />} /><Route path="/blood-pressure" element={<BloodPressurePage />} /><Route path="/reports" element={<ReportsPage />} /><Route path="/reports/weekly/:reportId" element={<WeeklyReportPage />} /><Route path="/sync" element={<SyncCenterPage />} /><Route path="/settings" element={<SettingsPage bootstrap={data} />} /><Route path="*" element={<Navigate to="/overview" replace />} /></Routes></Suspense></Layout>}</JobsProvider>
+  return <JobsProvider>{!data.sources.garmin.connected && !explore ? <Onboarding bootstrap={data} onExplore={() => setExplore(true)} /> : <><DashboardBootstrap /><Layout bootstrap={data}><Suspense fallback={<LoadingScreen />}><Routes><Route path="/" element={<Navigate to="/overview" replace />} /><Route path="/overview" element={<Overview />} /><Route path="/training" element={<DomainPage domain="training" />} /><Route path="/recovery" element={<DomainPage domain="recovery" />} /><Route path="/body" element={<BodyPage />} /><Route path="/blood-pressure" element={<BloodPressurePage />} /><Route path="/reports" element={<ReportsPage />} /><Route path="/reports/weekly/:reportId" element={<WeeklyReportPage />} /><Route path="/sync" element={<SyncCenterPage />} /><Route path="/settings" element={<SettingsPage bootstrap={data} />} /><Route path="*" element={<Navigate to="/overview" replace />} /></Routes></Suspense></Layout></>}</JobsProvider>
+}
+
+function DashboardBootstrap() {
+  const { data } = useQuery({ queryKey: ['dashboard', 7], queryFn: () => api<{ report: unknown | null }>('/dashboard?period_days=7') })
+  const { start } = useJobs()
+  const requested = useRef(false)
+  useEffect(() => {
+    if (requested.current || !data || data.report) return
+    requested.current = true
+    void start('/dashboard/refresh', { period_days: 7 })
+  }, [data, start])
+  return null
 }

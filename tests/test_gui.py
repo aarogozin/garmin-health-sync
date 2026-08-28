@@ -413,14 +413,17 @@ def test_pressure_confirmation_escapes_notes() -> None:
     assert "&lt;script&gt;" in response.text
 
 
-def test_job_manager_rejects_parallel_operation() -> None:
+def test_job_manager_queues_parallel_operation() -> None:
     manager = JobManager()
     gate: Future[None] = Future()
     first = manager.submit(lambda: gate.result(timeout=2))
     assert first is not None
-    assert manager.submit(lambda: None) is None
+    second = manager.submit(lambda: None)
+    assert second is not None
+    assert not manager.jobs[second].started.is_set()
     gate.set_result(None)
     manager.jobs[first].future.result(timeout=2)
+    manager.jobs[second].future.result(timeout=2)
 
 
 def test_latest_renpho_is_shown_and_pdf_is_protected() -> None:

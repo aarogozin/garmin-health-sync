@@ -64,6 +64,7 @@ table{width:100%;border-collapse:collapse;margin:12px 0}th,td{padding:8px;border
 @dataclass(slots=True)
 class Job:
     future: Future[Any]
+    started: threading.Event
 
 
 class JobManager:
@@ -71,29 +72,22 @@ class JobManager:
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="garmin-sync")
         self.jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
-        self._busy = False
 
     def submit(self, operation: Callable[[], Any]) -> str | None:
-        with self._lock:
-            if self._busy:
-                return None
-            self._busy = True
+        started = threading.Event()
 
         def run() -> Any:
-            try:
-                return operation()
-            finally:
-                with self._lock:
-                    self._busy = False
+            started.set()
+            return operation()
 
         job_id = uuid.uuid4().hex
-        self.jobs[job_id] = Job(self.executor.submit(run))
+        self.jobs[job_id] = Job(self.executor.submit(run), started)
         return job_id
 
     @property
     def busy(self) -> bool:
         with self._lock:
-            return self._busy
+            return any(not job.future.done() for job in self.jobs.values())
 
 
 class LoopbackWSGIServer(BaseWSGIServer):

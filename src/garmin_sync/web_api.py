@@ -110,12 +110,6 @@ def register_api(app: Any, state: WebApiState) -> None:
 
     def start(operation: Any, *, kind: str) -> Response:
         job_id = state.jobs.submit(operation)
-        if job_id is None:
-            return envelope(
-                "conflict",
-                code=409,
-                error="Another operation is already running",
-            )
         state.events.append(f"{kind}: started")
         return envelope("queued", {"job_id": job_id, "kind": kind}, code=202)
 
@@ -189,7 +183,6 @@ def register_api(app: Any, state: WebApiState) -> None:
                     "gui_auth": state.token_store is not None,
                     "renpho_auth": state.renpho_store is not None,
                     "weekly_report": True,
-                    "activity_sync": True,
                     "body_measurements": True,
                 },
                 "latest_weekly_report_id": (
@@ -554,7 +547,11 @@ def _job_payload(job_id: str, state: WebApiState, *, include_result: bool) -> di
         return {"id": job_id, "state": "awaiting_input", "stage": "Enter Garmin MFA code"}
     if not job.future.done():
         progress = state.service.get_report_progress(job_id)
-        return {"id": job_id, "state": "running", **progress}
+        return {
+            "id": job_id,
+            "state": "running" if job.started.is_set() else "queued",
+            **progress,
+        }
     try:
         result = job.future.result()
         payload = _consume_result(result, state)
