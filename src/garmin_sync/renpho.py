@@ -5,15 +5,18 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 import requests
+from renpho import RenphoAPIError
 from renpho import RenphoClient as CloudClient
 from renpho.crypto import decrypt_response, encrypt_request
 
 from .activities import RenphoActivityRecord, RenphoActivityTemplate
 from .models import BERLIN, BodyComposition, ValidationError
 from .renpho_report import RenphoReportData, normalize_report
+
+T = TypeVar("T")
 
 
 class RenphoError(RuntimeError):
@@ -193,7 +196,16 @@ class RenphoCloud:
         return _first_text(raw, "id", "recordId") if isinstance(raw, dict) else None
 
     def _activity_call(self, endpoint: str, payload: dict[str, Any], *, write: bool) -> Any:
-        api = self.authenticate()
+        if write:
+            return self._activity_call_with_api(self.authenticate(), endpoint, payload, write=True)
+        return self._read_with_reauth(
+            lambda api: self._activity_call_with_api(api, endpoint, payload, write=False),
+            "RENPHO rejected the refreshed activity session",
+        )
+
+    def _activity_call_with_api(
+        self, api: RenphoAPI, endpoint: str, payload: dict[str, Any], *, write: bool
+    ) -> Any:
         if api.user_id is None:
             raise RenphoError("RENPHO login returned no user identifier")
         body = {"userId": str(api.user_id), **payload}
@@ -206,10 +218,14 @@ class RenphoCloud:
             if isinstance(data, str):
                 return decrypt_response(data)
             return data if data is not None else response
+        except RenphoAPIError:
+            raise
         except RenphoError:
             raise
         except requests.RequestException as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
+            if not write and status in {401, 403}:
+                raise
             if status in {401, 403}:
                 raise RenphoError("RENPHO rejected the saved credentials") from exc
             if status == 429:
@@ -227,13 +243,7 @@ class RenphoCloud:
             raise RenphoError("RENPHO returned unreadable activity data") from exc
 
     def fetch(self) -> tuple[list[RenphoMeasurement], int]:
-        api = self.authenticate()
-        try:
-            raw_items = api.get_all_measurements()
-        except requests.RequestException as exc:
-            raise RenphoError("Could not download measurements from RENPHO") from exc
-        except Exception as exc:
-            raise RenphoError("RENPHO returned an unreadable measurement response") from exc
+        raw_items = self._fetch_measurements()
 
         result: list[RenphoMeasurement] = []
         skipped = 0
@@ -244,34 +254,77 @@ class RenphoCloud:
                 skipped += 1
         return sorted(result, key=lambda item: item.body.measured_at, reverse=True), skipped
 
+    def _fetch_measurements(self) -> list[dict[str, Any]]:
+        return self._read_with_reauth(
+            lambda api: api.get_all_measurements(),
+            "RENPHO rejected the refreshed measurement session",
+            request_error="Could not download measurements from RENPHO",
+            response_error="RENPHO returned an unreadable measurement response",
+        )
+
+    def _read_with_reauth(
+        self,
+        operation: Callable[[RenphoAPI], T],
+        rejected_message: str,
+        *,
+        request_error: str = "Could not read data from RENPHO",
+        response_error: str = "RENPHO returned unreadable data",
+    ) -> T:
+        """Retry one rejected *read* with a fresh session, never a cloud write."""
+        for attempt in range(2):
+            api = self.authenticate()
+            try:
+                return operation(api)
+            except RenphoAPIError as exc:
+                if attempt == 0:
+                    self._api = None
+                    continue
+                raise RenphoError(rejected_message) from exc
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                if status in {401, 403} and attempt == 0:
+                    self._api = None
+                    continue
+                if status == 429:
+                    raise RenphoError(
+                        "RENPHO rate-limited the request; wait before retrying"
+                    ) from exc
+                if status in {401, 403}:
+                    raise RenphoError(rejected_message) from exc
+                raise RenphoError(request_error) from exc
+            except requests.RequestException as exc:
+                raise RenphoError(request_error) from exc
+            except Exception as exc:
+                raise RenphoError(response_error) from exc
+        raise RenphoError(response_error)
+
     def girth_record_count(self) -> int | None:
         """Return RENPHO's cloud-side girth count without exposing record contents."""
-        api = self.authenticate()
-        try:
-            value = api.get_device_info().get("girth")
-        except requests.RequestException as exc:
-            raise RenphoError("Could not read RENPHO device metadata") from exc
-        except Exception as exc:
-            raise RenphoError("RENPHO returned unreadable device metadata") from exc
+        value = self._read_with_reauth(
+            lambda api: api.get_device_info().get("girth"),
+            "RENPHO rejected the refreshed device session",
+            request_error="Could not read RENPHO device metadata",
+            response_error="RENPHO returned unreadable device metadata",
+        )
         return value if isinstance(value, int) and not isinstance(value, bool) else None
 
     def fetch_girth(self) -> list[RenphoGirthMeasurement]:
         """Read circumference history from RENPHO's undocumented app endpoint."""
-        api = self.authenticate()
-        if api.user_id is None:
-            raise RenphoError("RENPHO login returned no user identifier")
-        try:
-            # Upstream does not expose the tape endpoint, so the adapter uses its
-            # authenticated/encrypted transport while keeping it out of UI code.
+        def fetch(api: RenphoAPI) -> Any:
+            if api.user_id is None:
+                raise RenphoError("RENPHO login returned no user identifier")
             result = api._post(
                 "RenphoHealth/renpho/girth/queryAllGirthsDataList",
                 encrypt_request({"userId": str(api.user_id)}),
             )
-            raw_items = decrypt_response(result["data"])
-        except requests.RequestException as exc:
-            raise RenphoError("Could not download body measurements from RENPHO") from exc
-        except Exception as exc:
-            raise RenphoError("RENPHO returned unreadable body measurements") from exc
+            return decrypt_response(result["data"])
+
+        raw_items = self._read_with_reauth(
+            fetch,
+            "RENPHO rejected the refreshed body-measurement session",
+            request_error="Could not download body measurements from RENPHO",
+            response_error="RENPHO returned unreadable body measurements",
+        )
         if not isinstance(raw_items, list):
             raise RenphoError("RENPHO returned unreadable body measurements")
         measurements: list[RenphoGirthMeasurement] = []

@@ -11,6 +11,12 @@ htmlcov/
 .gstack/
 dist/
 build/
+frontend/*.tsbuildinfo
+frontend/test-results/
+frontend/playwright-report/
+frontend/vite.config.js
+frontend/vite.config.d.ts
+frontend/node_modules/
 *.egg-info/
 __pycache__/
 *.py[cod]

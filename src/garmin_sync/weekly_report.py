@@ -190,18 +190,43 @@ class ExtendedGarminDomain:
 
 
 @dataclass(frozen=True, slots=True)
+class ChartAxisSpec:
+    axis_id: str
+    label: str
+    unit: str
+    formatter: str
+    minimum: float | None = None
+    maximum: float | None = None
+    scale: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class ChartSeries:
+    series_id: str
     name: str
     values: tuple[float | None, ...]
-    color: str
+    axis_id: str
+    render_type: str
+    color_token: str
+    source: str = "Garmin"
+
+
+@dataclass(frozen=True, slots=True)
+class ChartReferenceBand:
+    label: str
+    start: float
+    end: float
+    color_token: str
 
 
 @dataclass(frozen=True, slots=True)
 class ChartSpec:
     chart_id: str
     title: str
-    labels: tuple[str, ...]
+    timestamps: tuple[str, ...]
+    axes: tuple[ChartAxisSpec, ...]
     series: tuple[ChartSeries, ...]
+    reference_bands: tuple[ChartReferenceBand, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -864,10 +889,39 @@ def chart_payload(report: WeeklyHealthReport) -> dict[str, Any]:
             {
                 "id": chart.chart_id,
                 "title": chart.title,
-                "labels": list(chart.labels),
+                "timestamps": list(chart.timestamps),
+                "axes": [
+                    {
+                        "id": axis.axis_id,
+                        "label": axis.label,
+                        "unit": axis.unit,
+                        "formatter": axis.formatter,
+                        "minimum": axis.minimum,
+                        "maximum": axis.maximum,
+                        "scale": axis.scale,
+                    }
+                    for axis in chart.axes
+                ],
                 "series": [
-                    {"name": series.name, "values": list(series.values), "color": series.color}
+                    {
+                        "id": series.series_id,
+                        "name": series.name,
+                        "values": list(series.values),
+                        "axis_id": series.axis_id,
+                        "render_type": series.render_type,
+                        "color_token": series.color_token,
+                        "source": series.source,
+                    }
                     for series in chart.series
+                ],
+                "reference_bands": [
+                    {
+                        "label": band.label,
+                        "start": band.start,
+                        "end": band.end,
+                        "color_token": band.color_token,
+                    }
+                    for band in chart.reference_bands
                 ],
             }
             for chart in report.comprehensive.charts
@@ -901,19 +955,40 @@ def _chart_specs(
     pressure: PressureSeries,
     body: tuple[BodyMeasurementPoint, ...],
 ) -> tuple[ChartSpec, ...]:
-    labels = tuple(day.isoformat() for day in days)
+    timestamps = tuple(day.isoformat() for day in days)
     activity_days = {
         day: [item for item in activities if item.measured_at.date() == day] for day in days
     }
+    def axis(
+        axis_id: str, label: str, unit: str, formatter: str, minimum: float | None = None,
+        maximum: float | None = None, scale: bool = True,
+    ) -> ChartAxisSpec:
+        return ChartAxisSpec(axis_id, label, unit, formatter, minimum, maximum, scale)
+
+    def series(
+        series_id: str, name: str, values: tuple[float | None, ...], axis_id: str,
+        color_token: str, render_type: str = "line", source: str = "Garmin",
+    ) -> ChartSeries:
+        return ChartSeries(series_id, name, values, axis_id, render_type, color_token, source)
+
     return (
-        ChartSpec("stress-battery", "Stress and Body Battery", labels, (ChartSeries("Stress", tuple(stress), "#E67E22"), ChartSeries("Body Battery charged", tuple(battery), "#16A085"))),
-        ChartSpec("sleep", "Sleep and recovery", labels, (ChartSeries("Sleep duration h", tuple(x.sleep_hours for x in recovery), "#4776E6"), ChartSeries("Sleep score", tuple(x.sleep_score for x in recovery), "#16A085"), ChartSeries("Deep sleep h", tuple(x.deep_hours for x in sleep), "#34495E"), ChartSeries("REM sleep h", tuple(x.rem_hours for x in sleep), "#8E44AD"), ChartSeries("Overnight HRV", tuple(x.overnight_hrv for x in sleep), "#E67E22"))),
-        ChartSpec("heart-respiration", "Heart, SpO2 and respiration", labels, (ChartSeries("Min HR", tuple(x.min_hr for x in health), "#3498DB"), ChartSeries("Max HR", tuple(x.max_hr for x in health), "#E74C3C"), ChartSeries("Sleep SpO2", tuple(x.spo2 for x in sleep), "#16A085"), ChartSeries("Sleep respiration", tuple(x.respiration for x in sleep), "#9B59B6"))),
-        ChartSpec("movement", "Movement and energy", labels, (ChartSeries("Steps", tuple(x.steps for x in recovery), "#4776E6"), ChartSeries("Calories", tuple(x.calories for x in health), "#E67E22"), ChartSeries("Floors", tuple(x.floors for x in health), "#16A085"), ChartSeries("Intensity minutes", tuple((x.moderate_minutes or 0) + (x.vigorous_minutes or 0) for x in recovery), "#8E44AD"))),
-        ChartSpec("training", "Training duration and load", labels, (ChartSeries("Duration min", tuple(sum(item.duration_minutes for item in activity_days[day]) for day in days), "#4776E6"), ChartSeries("Training load", tuple(sum(item.training_load or 0 for item in activity_days[day]) for day in days), "#E67E22"))),
-        ChartSpec("hydration", "Hydration and nutrition", labels, (ChartSeries("Hydration ml", tuple(x.hydration_ml for x in hydration), "#2980B9"), ChartSeries("Nutrition kcal", tuple(x.nutrition_calories for x in hydration), "#F39C12"))),
-        ChartSpec("blood-pressure", "Blood pressure", tuple(item.measured_at.isoformat() for item in pressure.readings), (ChartSeries("Systolic", tuple(float(item.systolic) for item in pressure.readings), "#E74C3C"), ChartSeries("Diastolic", tuple(float(item.diastolic) for item in pressure.readings), "#4776E6"))),
-        ChartSpec("body-composition", "Weight and body composition", tuple(item.measured_at.isoformat() for item in body), (ChartSeries("Weight kg", tuple(item.weight_kg for item in body), "#4776E6"), ChartSeries("Body fat %", tuple(item.body_fat_pct for item in body), "#E67E22"), ChartSeries("Muscle mass kg", tuple(item.muscle_mass_kg for item in body), "#16A085"))),
+        ChartSpec("stress-battery", "Stress and Body Battery", timestamps, (axis("score", "Score", "score", "integer", 0, 100, False),), (series("stress", "Stress", tuple(stress), "score", "stress"), series("body-battery", "Body Battery", tuple(battery), "score", "battery"))),
+        ChartSpec("sleep-duration", "Sleep duration and stages", timestamps, (axis("hours", "Hours", "h", "one_decimal", 0),), (series("sleep-duration", "Sleep duration", tuple(x.sleep_hours for x in recovery), "hours", "sleep", "bar"), series("deep-sleep", "Deep sleep", tuple(x.deep_hours for x in sleep), "hours", "deep"), series("rem-sleep", "REM sleep", tuple(x.rem_hours for x in sleep), "hours", "rem"))),
+        ChartSpec("sleep-score", "Sleep score", timestamps, (axis("score", "Score", "score", "integer", 0, 100, False),), (series("sleep-score", "Sleep score", tuple(x.sleep_score for x in recovery), "score", "sleep"),)),
+        ChartSpec("hrv", "Overnight HRV", timestamps, (axis("hrv", "HRV", "ms", "integer"),), (series("overnight-hrv", "Overnight HRV", tuple(x.overnight_hrv for x in sleep), "hrv", "violet"),)),
+        ChartSpec("heart-rate", "Heart rate", timestamps, (axis("bpm", "Heart rate", "bpm", "integer"),), (series("min-hr", "Daily minimum HR", tuple(x.min_hr for x in health), "bpm", "blue"), series("max-hr", "Daily maximum HR", tuple(x.max_hr for x in health), "bpm", "red"))),
+        ChartSpec("spo2", "Sleep SpO₂", timestamps, (axis("percent", "SpO₂", "%", "one_decimal", 80, 100, False),), (series("spo2", "Sleep SpO₂", tuple(x.spo2 for x in sleep), "percent", "cyan"),)),
+        ChartSpec("respiration", "Sleep respiration", timestamps, (axis("breaths", "Respiration", "breaths/min", "one_decimal"),), (series("respiration", "Sleep respiration", tuple(x.respiration for x in sleep), "breaths", "violet"),)),
+        ChartSpec("steps", "Steps", timestamps, (axis("steps", "Steps", "steps", "integer", 0),), (series("steps", "Steps", tuple(x.steps for x in recovery), "steps", "blue", "bar"),)),
+        ChartSpec("calories", "Calories", timestamps, (axis("kcal", "Calories", "kcal", "integer", 0),), (series("calories", "Calories", tuple(x.calories for x in health), "kcal", "amber", "bar"),)),
+        ChartSpec("intensity-minutes", "Intensity minutes", timestamps, (axis("minutes", "Minutes", "min", "integer", 0),), (series("intensity-minutes", "Intensity minutes", tuple((x.moderate_minutes or 0) + (x.vigorous_minutes or 0) for x in recovery), "minutes", "violet", "bar"),)),
+        ChartSpec("training-duration", "Training duration", timestamps, (axis("minutes", "Minutes", "min", "integer", 0),), (series("training-duration", "Duration", tuple(sum(item.duration_minutes for item in activity_days[day]) for day in days), "minutes", "blue", "bar"),)),
+        ChartSpec("training-load", "Training load", timestamps, (axis("load", "Load", "load", "integer", 0),), (series("training-load", "Training load", tuple(sum(item.training_load or 0 for item in activity_days[day]) for day in days), "load", "amber", "bar"),)),
+        ChartSpec("hydration", "Hydration", timestamps, (axis("ml", "Hydration", "ml", "integer", 0),), (series("hydration", "Hydration", tuple(x.hydration_ml for x in hydration), "ml", "cyan", "bar"),)),
+        ChartSpec("nutrition", "Nutrition energy", timestamps, (axis("kcal", "Energy", "kcal", "integer", 0),), (series("nutrition", "Nutrition calories", tuple(x.nutrition_calories for x in hydration), "kcal", "amber", "bar"),)),
+        ChartSpec("blood-pressure", "Blood pressure", tuple(item.measured_at.isoformat() for item in pressure.readings), (axis("mmhg", "Pressure", "mmHg", "integer"),), (series("systolic", "Systolic", tuple(float(item.systolic) for item in pressure.readings), "mmhg", "red", "scatter"), series("diastolic", "Diastolic", tuple(float(item.diastolic) for item in pressure.readings), "mmhg", "blue", "scatter")), (ChartReferenceBand("Home monitoring reference", 0, 135, "neutral"),)),
+        ChartSpec("body-kg", "Weight and muscle mass", tuple(item.measured_at.isoformat() for item in body), (axis("kg", "Mass", "kg", "one_decimal"),), (series("weight", "Weight", tuple(item.weight_kg for item in body), "kg", "blue", source="Garmin + RENPHO"), series("muscle-mass", "Muscle mass", tuple(item.muscle_mass_kg for item in body), "kg", "battery", source="RENPHO"))),
+        ChartSpec("body-fat", "Body fat", tuple(item.measured_at.isoformat() for item in body), (axis("percent", "Body fat", "%", "one_decimal", 0, 100, False),), (series("body-fat", "Body fat", tuple(item.body_fat_pct for item in body), "percent", "amber", source="RENPHO"),)),
     )
 
 

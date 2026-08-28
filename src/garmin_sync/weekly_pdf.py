@@ -23,10 +23,16 @@ from reportlab.platypus import (
 from .weekly_report import RoutePoint, WeeklyHealthReport, group_lifestyle_events
 
 INK = colors.HexColor("#182432")
-BLUE = colors.HexColor("#4776E6")
-TEAL = colors.HexColor("#16A085")
+BLUE = colors.HexColor("#006F9E")
+TEAL = colors.HexColor("#167C92")
 PALE = colors.HexColor("#F2F6FC")
 MUTED = colors.HexColor("#66788A")
+CHART_COLORS = {
+    "blue": "#006F9E", "cyan": "#167C92", "battery": "#287F62",
+    "sleep": "#385FAD", "deep": "#263D67", "rem": "#7257C7",
+    "violet": "#7257C7", "stress": "#B86000", "amber": "#B86000",
+    "red": "#B13D4D", "neutral": "#66788A",
+}
 
 
 def render_weekly_report_pdf(report: WeeklyHealthReport) -> bytes:
@@ -147,7 +153,7 @@ def _comprehensive(report: WeeklyHealthReport, s: dict[str, ParagraphStyle]) -> 
     result: list[Flowable] = [Paragraph("Comprehensive health metrics", s["h1"])]
     for chart in report.comprehensive.charts:
         result.append(Paragraph(chart.title, s["h2"]))
-        result.append(_MiniChart([[value for value in series.values if value is not None] for series in chart.series], [colors.HexColor(series.color) for series in chart.series]))
+        result.append(_MiniChart([[value for value in series.values if value is not None] for series in chart.series], [colors.HexColor(CHART_COLORS.get(series.color_token, "#006F9E")) for series in chart.series]))
         result.append(
             Paragraph(" · ".join(series.name for series in chart.series), s["small"])
         )

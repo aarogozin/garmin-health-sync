@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from time import monotonic
+from time import monotonic, sleep
 from typing import Any, Protocol, TypeVar, cast
 
 from garminconnect import (
@@ -34,6 +35,13 @@ class RateLimited(GarminSyncError):
 
 class UploadUncertain(GarminSyncError):
     """The write may have succeeded and must not be retried automatically."""
+
+
+@dataclass(frozen=True, slots=True)
+class GarminProfile:
+    display_name: str
+    initials: str
+    avatar_url: str | None
 
 
 class GarminAPI(Protocol):
@@ -112,6 +120,21 @@ class GarminClient:
         except Exception as exc:
             raise self._translate(exc, "Saved Garmin session is no longer valid") from exc
 
+    def profile(self) -> GarminProfile:
+        """Read minimal profile data without exposing Garmin's image URL to the UI."""
+        api = self._connected_api()
+        try:
+            raw = api.client.connectapi("/userprofile-service/socialProfile")
+        except Exception as exc:
+            raise self._translate(exc, "Could not read Garmin profile") from exc
+        if not isinstance(raw, dict):
+            raise GarminSyncError("Garmin returned an unreadable profile")
+        display_name = str(raw.get("displayName") or raw.get("fullName") or "Garmin user").strip()
+        words = [word for word in display_name.split() if word]
+        initials = "".join(word[0] for word in words[:2]).upper() or "G"
+        avatar = raw.get("profileImageUrlMedium") or raw.get("profileImageUrlSmall")
+        return GarminProfile(display_name, initials, avatar if isinstance(avatar, str) else None)
+
     def add_body_composition(self, measurement: BodyComposition) -> None:
         api = self._connected_api()
         try:
@@ -120,17 +143,27 @@ class GarminClient:
             raise self._translate_write(exc) from exc
         if not _upload_processed(upload):
             raise GarminSyncError("Garmin rejected the FIT file before creating a measurement")
-        try:
-            data = api.get_body_composition(measurement.measured_at.date().isoformat())
-        except Exception as exc:
-            raise UploadUncertain(
-                "Upload returned, but verification failed; check Garmin Connect before retrying"
-            ) from exc
-        if not _has_exact_body_record(data, measurement):
+        if not self._verify_body_upload(api, measurement):
             raise UploadUncertain(
                 "Garmin processed the FIT file but did not return the exact timestamp and weight; "
                 "check Garmin Connect before retrying"
             )
+
+    @staticmethod
+    def _verify_body_upload(api: GarminAPI, measurement: BodyComposition) -> bool:
+        """Allow Garmin's read model to catch up without issuing another FIT upload."""
+        for delay in (0, 1, 3):
+            if delay:
+                sleep(delay)
+            try:
+                data = api.get_body_composition(measurement.measured_at.date().isoformat())
+            except Exception as exc:
+                raise UploadUncertain(
+                    "Upload returned, but verification failed; check Garmin Connect before retrying"
+                ) from exc
+            if _has_exact_body_record(data, measurement):
+                return True
+        return False
 
     def has_body_composition(self, measurement: BodyComposition) -> bool:
         api = self._connected_api()

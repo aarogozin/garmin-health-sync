@@ -4,6 +4,8 @@
 .venv
 .pytest_cache
 .mypy_cache
+frontend/node_modules
+frontend/*.tsbuildinfo
 .ruff_cache
 __pycache__
 *.py[cod]

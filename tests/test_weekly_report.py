@@ -272,6 +272,12 @@ def test_comprehensive_domains_lifestyle_associations_and_private_route() -> Non
     payload = chart_payload(report)
     assert payload["routes"][0]["points"] == [[52.5, 13.4], [52.51, 13.42]]
     assert payload["map_tiles_enabled"] is True
+    charts = {chart["id"]: chart for chart in payload["charts"]}
+    assert charts["stress-battery"]["axes"][0]["unit"] == "score"
+    assert charts["heart-rate"]["axes"][0]["unit"] == "bpm"
+    assert charts["body-kg"]["axes"][0]["unit"] == "kg"
+    assert charts["body-fat"]["axes"][0]["unit"] == "%"
+    assert all("color" not in series for chart in charts.values() for series in chart["series"])
     assert "Private trail" not in repr(report.availability)
 
 

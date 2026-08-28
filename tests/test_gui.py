@@ -1,8 +1,13 @@
+import re
 from concurrent.futures import Future
 from datetime import datetime
 from threading import Event
+from time import sleep
 from typing import Any
 
+import pytest
+
+import garmin_sync.web_api as web_api
 from garmin_sync.activities import (
     ActivitySyncCandidate,
     ActivitySyncPreview,
@@ -18,6 +23,7 @@ from garmin_sync.service import (
     LatestRenphoReport,
     OperationResult,
     RenphoHistory,
+    RenphoPreview,
     ResultStatus,
     WeeklyReportResult,
 )
@@ -101,23 +107,240 @@ class FakeService:
         return WeeklyReportResult(ResultStatus.PARTIAL, report, render_weekly_report_pdf(report))
 
 
+def test_terminal_job_state_preserves_safe_business_outcomes() -> None:
+    assert web_api._terminal_state(OperationResult(ResultStatus.SUCCESS, "ok")) == "verified"
+    assert (
+        web_api._terminal_state(OperationResult(ResultStatus.CONFLICT, "duplicate"))
+        == "conflict"
+    )
+    assert web_api._terminal_state(OperationResult(ResultStatus.UNCERTAIN, "check")) == "uncertain"
+    assert (
+        web_api._terminal_state(OperationResult(ResultStatus.RATE_LIMITED, "wait"))
+        == "rate_limited"
+    )
+
+
+def test_avatar_proxy_accepts_only_valid_in_memory_image(monkeypatch: Any) -> None:
+    class Response:
+        is_redirect = False
+        status_code = 200
+        headers = {"Content-Type": "image/png"}
+
+        @staticmethod
+        def iter_content(_: int) -> list[bytes]:
+            return [b"\x89PNG\r\n\x1a\nimage"]
+
+    calls: list[str] = []
+    monkeypatch.setattr(web_api.requests, "get", lambda url, **_: calls.append(url) or Response())
+    cache = web_api.AvatarCache()
+    content, mimetype = web_api._avatar_bytes("https://images.example.amazonaws.com/a.png", cache)
+    assert content.startswith(b"\x89PNG")
+    assert mimetype == "image/png"
+    web_api._avatar_bytes("https://images.example.amazonaws.com/a.png", cache)
+    assert len(calls) == 1
+    with pytest.raises(ValueError):
+        web_api._avatar_bytes("http://evil.example/avatar.png", web_api.AvatarCache())
+
+
 def test_gui_index_and_security_headers() -> None:
     app = create_app(FakeService(), "test-token")  # type: ignore[arg-type]
     response = app.test_client().get("/", headers={"Host": "127.0.0.1"})
     assert response.status_code == 200
-    assert "Add blood pressure" in response.text
+    assert "Garmin Health Sync" in response.text
+    assert "/ui-assets/assets/" in response.text
     assert "default-src 'none'" in response.headers["Content-Security-Policy"]
-    assert "img-src 'self' https://tile.openstreetmap.org" in response.headers[
+    assert "script-src 'self'" in response.headers["Content-Security-Policy"]
+    assert "style-src 'self'" in response.headers["Content-Security-Policy"]
+    assert "img-src 'self' data: https://tile.openstreetmap.org" in response.headers[
         "Content-Security-Policy"
     ]
-    assert "Show OpenStreetMap background" in response.text
-    assert "View body measurements" in response.text
-    assert "waist, chest, arms, thighs, calves" in response.text
-    assert "Garmin → RENPHO activities" in response.text
     assert response.headers["Cache-Control"] == "no-store"
     assert response.headers["Cross-Origin-Opener-Policy"] == "same-origin"
     assert response.headers["Cross-Origin-Resource-Policy"] == "same-origin"
     assert response.headers["Permissions-Policy"] == "camera=(), geolocation=(), microphone=()"
+    asset_path = re.search(r'src="([^"]+\.js)"', response.text)
+    assert asset_path is not None
+    asset = app.test_client().get(
+        asset_path.group(1), headers={"Host": "127.0.0.1"}
+    )
+    assert asset.status_code == 200
+    assert asset.mimetype in {"application/javascript", "text/javascript"}
+
+
+def test_v1_bootstrap_and_dashboard_are_structured_and_no_store() -> None:
+    app = create_app(FakeService(), "test-token")  # type: ignore[arg-type]
+    assert app.extensions["garmin_sync_startup_ready"].wait(timeout=2)
+    client = app.test_client()
+    bootstrap = client.get("/api/v1/bootstrap", headers={"Host": "127.0.0.1"})
+    assert bootstrap.status_code == 200
+    payload = bootstrap.get_json()
+    assert payload["status"] == "success"
+    assert payload["data"]["version"] == "1.0.0"
+    assert payload["data"]["csrf_token"] == "test-token"
+    assert payload["data"]["sources"]["garmin"]["connected"] is True
+    assert bootstrap.headers["Cache-Control"] == "no-store"
+
+    dashboard = client.get("/api/v1/dashboard", headers={"Host": "127.0.0.1"})
+    assert dashboard.get_json()["data"]["latest_body"]["weight_kg"] == 89.5
+
+
+def test_v1_json_mutations_require_csrf_and_validate_pressure() -> None:
+    app = create_app(FakeService(), "test-token")  # type: ignore[arg-type]
+    assert app.extensions["garmin_sync_startup_ready"].wait(timeout=2)
+    client = app.test_client()
+    body = {
+        "measured_at": "2026-08-13T08:00",
+        "systolic": 120,
+        "diastolic": 80,
+        "pulse": 60,
+        "notes": "safe",
+    }
+    assert client.post("/api/v1/pressure/preview", json=body).status_code == 403
+    invalid = client.post(
+        "/api/v1/pressure/preview",
+        json={**body, "systolic": 500},
+        headers={"Host": "127.0.0.1", "X-CSRF-Token": "test-token"},
+    )
+    assert invalid.status_code == 400
+    assert invalid.get_json()["status"] == "validation_error"
+    valid = client.post(
+        "/api/v1/pressure/preview",
+        json=body,
+        headers={"Host": "127.0.0.1", "X-CSRF-Token": "test-token"},
+    )
+    assert valid.status_code == 200
+    assert valid.get_json()["data"]["measurement"]["systolic"] == 120
+
+
+def test_v1_schedule_status_and_install_are_protected(monkeypatch: Any, tmp_path: Any) -> None:
+    target = tmp_path / "daily.plist"
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(web_api.sys, "platform", "darwin")
+    monkeypatch.setattr(web_api.schedule, "plist_path", lambda: target)
+    monkeypatch.setattr(web_api.schedule, "is_loaded", lambda: target.exists())
+    monkeypatch.setattr(web_api.schedule, "is_legacy", lambda: False)
+
+    def install(*, hour: int, minute: int) -> None:
+        calls.append((hour, minute))
+        target.touch()
+
+    monkeypatch.setattr(web_api.schedule, "install", install)
+    app = create_app(FakeService(), "test-token")  # type: ignore[arg-type]
+    assert app.extensions["garmin_sync_startup_ready"].wait(timeout=2)
+    client = app.test_client()
+    status = client.get("/api/v1/schedule", headers={"Host": "127.0.0.1"})
+    assert status.get_json()["data"] == {
+        "supported": True,
+        "installed": False,
+        "loaded": False,
+        "legacy": False,
+    }
+    missing_csrf = client.post(
+        "/api/v1/schedule/install", json={"hour": 7, "minute": 15}
+    )
+    assert missing_csrf.status_code == 403
+    result = _start_api_job(
+        client, "/api/v1/schedule/install", {"hour": 7, "minute": 15}
+    )
+    assert result["result"]["status"] == "success"
+    assert calls == [(7, 15)]
+
+
+def _finish_api_job(client: Any, location: str) -> dict[str, Any]:
+    for _ in range(50):
+        response = client.get(location, headers={"Host": "127.0.0.1"})
+        data = response.get_json()["data"]
+        if data["state"] in {
+            "verified",
+            "already_exists",
+            "conflict",
+            "partial",
+            "uncertain",
+            "auth_required",
+            "rate_limited",
+            "error",
+        }:
+            return data
+        sleep(0.01)
+    raise AssertionError("job did not finish")
+
+
+def _start_api_job(client: Any, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    response = client.post(
+        path,
+        json=body or {},
+        headers={"Host": "127.0.0.1", "X-CSRF-Token": "test-token"},
+    )
+    assert response.status_code == 202
+    job_id = response.get_json()["data"]["job_id"]
+    return _finish_api_job(client, f"/api/v1/jobs/{job_id}")
+
+
+def test_v1_jobs_serialize_latest_history_activity_and_weekly_report() -> None:
+    app = create_app(FakeService(), "test-token")  # type: ignore[arg-type]
+    assert app.extensions["garmin_sync_startup_ready"].wait(timeout=2)
+    client = app.test_client()
+
+    latest = _start_api_job(client, "/api/v1/renpho/latest")
+    assert latest["result"]["type"] == "renpho_latest"
+    assert latest["result"]["weight_kg"] == 89.5
+
+    history = _start_api_job(client, "/api/v1/renpho/history")
+    assert history["result"]["type"] == "renpho_history"
+    assert history["result"]["girth"][0]["values"][0]["label"] == "Waist"
+
+    activities = _start_api_job(
+        client, "/api/v1/activities/preview", {"period": "day"}
+    )
+    assert activities["result"]["type"] == "activity_preview"
+    assert activities["result"]["candidates"][0]["name"] == "<Morning Run>"
+
+    weekly = _start_api_job(client, "/api/v1/reports/weekly")
+    assert weekly["result"]["type"] == "weekly_report"
+    report_id = weekly["result"]["id"]
+    report = client.get(
+        f"/api/v1/reports/weekly/{report_id}", headers={"Host": "127.0.0.1"}
+    )
+    assert report.get_json()["data"]["start_date"] == "2026-08-09"
+    pdf = client.post(
+        f"/api/v1/reports/weekly/{report_id}/download",
+        headers={"Host": "127.0.0.1", "X-CSRF-Token": "test-token"},
+    )
+    assert pdf.data.startswith(b"%PDF-")
+    assert client.get("/api/v1/jobs", headers={"Host": "127.0.0.1"}).status_code == 200
+
+
+def test_v1_jobs_serialize_previews_and_operation_results() -> None:
+    class PreviewService(FakeService):
+        def preview_renpho(self, mode: str) -> RenphoPreview:
+            measurement = RenphoMeasurement(
+                "candidate",
+                BodyComposition(datetime(2026, 8, 15, 8, 0, tzinfo=BERLIN), 89.5),
+            )
+            return RenphoPreview(mode, (measurement,), 2)
+
+    app = create_app(PreviewService(), "test-token")  # type: ignore[arg-type]
+    assert app.extensions["garmin_sync_startup_ready"].wait(timeout=2)
+    client = app.test_client()
+    preview = _start_api_job(
+        client, "/api/v1/renpho/sync/preview", {"mode": "latest"}
+    )
+    assert preview["result"]["type"] == "renpho_preview"
+    assert preview["result"]["count"] == 1
+
+    pressure = _start_api_job(
+        client,
+        "/api/v1/pressure",
+        {
+            "measured_at": "2026-08-13T08:00",
+            "systolic": 120,
+            "diastolic": 80,
+            "pulse": 60,
+            "notes": "test",
+        },
+    )
+    assert pressure["result"]["type"] == "operation"
+    assert pressure["result"]["status"] == "success"
 
 
 def test_startup_readiness_waits_for_garmin_and_renpho_checks() -> None:

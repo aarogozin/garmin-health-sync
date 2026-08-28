@@ -22,6 +22,7 @@ from flask import (
     redirect,
     render_template_string,
     request,
+    send_from_directory,
     url_for,
 )
 from werkzeug.serving import BaseWSGIServer
@@ -41,6 +42,7 @@ from .service import (
     WeeklyReportResult,
 )
 from .state import SyncState
+from .web_api import WebApiState, register_api
 from .weekly_report import chart_payload, render_weekly_html
 from .weekly_web import CHART_JAVASCRIPT
 
@@ -108,6 +110,8 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
     app = Flask(__name__)
     app.config.update(MAX_CONTENT_LENGTH=16_384)
     token = csrf_token or secrets.token_urlsafe(32)
+    token_store = None
+    renpho_store = None
     if service is None:
         token_store, renpho_store = configured_stores()
         sync_service = HealthSyncService(
@@ -120,11 +124,15 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
     app.extensions["garmin_sync_startup_ready"] = startup_ready
     previews: dict[str, RenphoPreview] = {}
     activity_previews: dict[str, ActivitySyncPreview] = {}
+    api_previews: dict[str, Any] = {}
+    api_activity_previews: dict[str, Any] = {}
     latest_renpho: list[LatestRenphoReport] = []
     latest_error: list[str] = []
     events: list[str] = []
     weekly_reports: dict[str, WeeklyReportResult] = {}
     latest_weekly_id: list[str] = []
+    garmin_status: list[OperationResult] = []
+    garmin_profile: list[Any] = []
 
     @app.before_request
     def protect_request() -> Response | None:
@@ -146,16 +154,22 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
                 and _origin_hostname(origin) not in allowed_hosts
             ):
                 abort(403)
-            if not secrets.compare_digest(request.form.get("csrf", ""), token):
+            supplied_token = request.headers.get("X-CSRF-Token", "")
+            if not supplied_token:
+                supplied_token = request.form.get("csrf", "")
+            if not secrets.compare_digest(supplied_token, token):
                 abort(403)
         return None
 
     @app.after_request
     def secure_headers(response: Response) -> Response:
+        legacy = request.path.startswith(("/legacy", "/weekly-report/", "/jobs/"))
+        style_policy = "'unsafe-inline'" if legacy else "'self'"
         response.headers["Content-Security-Policy"] = (
             "default-src 'none'; script-src 'self'; connect-src 'self'; "
-            "img-src 'self' https://tile.openstreetmap.org; style-src 'unsafe-inline'; "
-            "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+            "font-src 'self'; img-src 'self' data: https://tile.openstreetmap.org; "
+            f"style-src {style_policy}; form-action 'self'; base-uri 'none'; "
+            "frame-ancestors 'none'"
         )
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -172,8 +186,8 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
     def health() -> Response:
         return Response("ok\n", content_type="text/plain")
 
-    @app.get("/")
-    def index() -> str:
+    @app.get("/legacy")
+    def legacy_index() -> str:
         disabled = "disabled" if jobs.busy else ""
         now = local_now().strftime("%Y-%m-%dT%H:%M")
         log = "\n".join(events[-20:]) or "No operations yet."
@@ -557,8 +571,14 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
             startup_ready.set()
 
     def startup_checks() -> LatestRenphoReport:
-        garmin_status = sync_service.status()
-        events.append(f"Garmin startup check: {garmin_status.status.value}")
+        status_result = sync_service.status()
+        garmin_status[:] = [status_result]
+        if status_result.status.value == "success":
+            try:
+                garmin_profile[:] = [sync_service.garmin.profile()]
+            except Exception:
+                garmin_profile.clear()
+        events.append(f"Garmin startup check: {status_result.status.value}")
         return sync_service.latest_report()
 
     auto_job = jobs.submit(startup_checks)
@@ -566,6 +586,53 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
         jobs.jobs[auto_job].future.add_done_callback(auto_loaded)
     else:
         startup_ready.set()
+
+    register_api(
+        app,
+        WebApiState(
+            service=sync_service,
+            jobs=jobs,
+            csrf_token=token,
+            latest_renpho=latest_renpho,
+            latest_error=latest_error,
+            weekly_reports=weekly_reports,
+            latest_weekly_id=latest_weekly_id,
+            previews=api_previews,
+            activity_previews=api_activity_previews,
+            events=events,
+            garmin_status=garmin_status,
+            garmin_profile=garmin_profile,
+            token_store=token_store,
+            renpho_store=renpho_store,
+        ),
+    )
+
+    @app.get("/ui-assets/<path:asset_path>")
+    def spa_asset(asset_path: str) -> Response:
+        asset_dir = files("garmin_sync").joinpath("web_dist")
+        return send_from_directory(str(asset_dir), asset_path)
+
+    @app.get("/")
+    @app.get("/overview")
+    @app.get("/training")
+    @app.get("/recovery")
+    @app.get("/body")
+    @app.get("/blood-pressure")
+    @app.get("/reports")
+    @app.get("/sync")
+    @app.get("/settings")
+    @app.get("/reports/weekly/<report_id>")
+    def spa(report_id: str | None = None) -> Response:
+        del report_id
+        index_file = files("garmin_sync").joinpath("web_dist", "index.html")
+        try:
+            return Response(index_file.read_bytes(), mimetype="text/html")
+        except FileNotFoundError:
+            return Response(
+                "Frontend assets are missing. Run 'npm run build' in frontend/.",
+                status=503,
+                mimetype="text/plain",
+            )
 
     return app
 

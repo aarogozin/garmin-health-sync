@@ -1,0 +1,22 @@
+import { useEffect, useState } from 'react'
+import { KeyRound, Laptop, LogOut, Moon, Shield, Sun } from 'lucide-react'
+import { PageHeader } from '../components/Common'
+import { api } from '../api'
+import { useJobs } from '../jobs'
+import type { Bootstrap } from '../types'
+import { applyTheme, THEME_STORAGE_KEY, type Theme } from '../theme'
+
+export function SettingsPage({ bootstrap }: { bootstrap: Bootstrap }) {
+  const { start, busy } = useJobs(); const [theme, setTheme] = useState<Theme>(() => { try { return (window.localStorage.getItem(THEME_STORAGE_KEY) as Theme) || 'system' } catch { return 'system' } }); const [garmin, setGarmin] = useState({ email: '', password: '' }); const [renpho, setRenpho] = useState({ email: '', password: '' })
+  useEffect(() => applyTheme(theme), [theme])
+  return <><PageHeader eyebrow="Local configuration" title="Settings" description="Connections, appearance and privacy controls for this device." />
+    <section className="settings-grid"><article className="panel"><div className="panel__head"><div><span className="eyebrow">Appearance</span><h2>Theme</h2></div><Laptop /></div><div className="theme-options">{([['system', Laptop], ['light', Sun], ['dark', Moon]] as const).map(([value, Icon]) => <button key={value} className={theme === value ? 'theme-option theme-option--active' : 'theme-option'} onClick={() => setTheme(value)}><Icon /><span>{value}</span></button>)}</div></article>
+      {bootstrap.profile && <article className="panel"><div className="panel__head"><div><span className="eyebrow">Garmin profile</span><h2>{bootstrap.profile.display_name}</h2></div>{bootstrap.profile.avatar_available ? <img className="settings-avatar" src="/api/v1/profile/avatar" alt="" /> : <span className="profile__initials">{bootstrap.profile.initials}</span>}</div><p className="muted">Profile image is proxied only in memory from Garmin and is never stored by Health Sync.</p></article>}
+      <article className="panel"><div className="panel__head"><div><span className="eyebrow">Privacy boundary</span><h2>Local by design</h2></div><Shield /></div><ul className="plain-list"><li>Health snapshots and PDFs stay in memory.</li><li>No analytics, service worker or external fonts.</li><li>Only UI preferences use browser storage.</li><li>GPS routes are opt-in for each report.</li></ul></article>
+      <ConnectionCard title="Garmin Connect" connected={bootstrap.sources.garmin.connected} detail={bootstrap.sources.garmin.detail} onSubmit={(credentials) => start('/auth/garmin/login', credentials)} values={garmin} setValues={setGarmin} busy={busy} onLogout={() => api('/auth/garmin/logout', { method: 'POST', body: '{}' }).then(() => location.reload())} />
+      <ConnectionCard title="RENPHO" connected={bootstrap.sources.renpho.connected} detail={bootstrap.sources.renpho.detail} onSubmit={(credentials) => start('/auth/renpho/login', credentials)} values={renpho} setValues={setRenpho} busy={busy} onLogout={() => api('/auth/renpho/logout', { method: 'POST', body: '{}' }).then(() => location.reload())} />
+    </section>
+  </>
+}
+
+function ConnectionCard({ title, connected, detail, onSubmit, values, setValues, busy, onLogout }: { title: string; connected: boolean; detail: string; onSubmit: (values: { email: string; password: string }) => Promise<string>; values: { email: string; password: string }; setValues: (values: { email: string; password: string }) => void; busy: boolean; onLogout: () => void }) { return <article className="panel connection-card"><div className="panel__head"><div><span className="eyebrow">Data source</span><h2>{title}</h2></div><span className={connected ? 'connection-badge connection-badge--ok' : 'connection-badge'}>{connected ? 'Connected' : 'Setup required'}</span></div><p>{detail}</p>{connected ? <button className="button button--danger" onClick={onLogout}><LogOut />Disconnect</button> : <form className="form-grid" onSubmit={(event) => { event.preventDefault(); void onSubmit(values) }}><label>Email<input type="email" value={values.email} onChange={(event) => setValues({ ...values, email: event.target.value })} required autoComplete="username" /></label><label>Password<input type="password" value={values.password} onChange={(event) => setValues({ ...values, password: event.target.value })} required autoComplete="current-password" /></label><button className="button button--primary" disabled={busy}><KeyRound />Connect</button></form>}</article> }

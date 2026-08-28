@@ -120,6 +120,10 @@ class HealthSyncService:
         try:
             name = self.garmin.connect()
             return OperationResult(ResultStatus.SUCCESS, f"Connected: {name}")
+        except AuthenticationRequired as exc:
+            return OperationResult(ResultStatus.AUTH_REQUIRED, str(exc))
+        except RateLimited as exc:
+            return OperationResult(ResultStatus.RATE_LIMITED, str(exc))
         except GarminSyncError as exc:
             return OperationResult(ResultStatus.ERROR, str(exc))
 
@@ -580,6 +584,10 @@ class HealthSyncService:
                             ResultStatus.SUCCESS, f"{item.body.measured_at.date()}: uploaded"
                         )
                     )
+        except AuthenticationRequired as exc:
+            results.append(OperationResult(ResultStatus.AUTH_REQUIRED, str(exc)))
+        except RateLimited as exc:
+            results.append(OperationResult(ResultStatus.RATE_LIMITED, str(exc)))
         except GarminSyncError as exc:
             results.append(OperationResult(ResultStatus.ERROR, str(exc)))
         return results

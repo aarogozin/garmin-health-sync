@@ -3,6 +3,34 @@
 All notable changes to Garmin Health Sync are documented here. The project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-08-27
+
+### Added
+
+- A responsive React and TypeScript health cockpit with Overview, Training,
+  Recovery, Body, Blood Pressure, Reports, Sync Center and Settings sections.
+- Local Garmin login/MFA and optional RENPHO onboarding without requiring the CLI.
+- Interactive locally bundled charts, accessible data tables, light/dark themes,
+  reorderable dashboard cards and a unified background Activity Center.
+- A versioned Flask JSON API with Pydantic request contracts and generated
+  TypeScript declarations.
+
+### Changed
+
+- Replaced the string-rendered homepage with a production SPA while preserving
+  the CLI, scheduler and verified application-service write paths.
+- Docker now builds the frontend in a pinned Node stage and ships only static
+  assets in the unprivileged Python runtime image.
+- The browser opens only after startup checks and the secure store are ready.
+
+### Security
+
+- Health snapshots, chart data, GPS and PDFs remain memory-only and `no-store`.
+- JSON mutations use the existing per-process CSRF token, strict Host/Origin
+  validation, size limits and single-worker write serialization.
+- Frontend scripts, fonts and styles are self-hosted; analytics, service workers
+  and external runtime dependencies are not used.
+
 ## [0.11.0] - 2026-08-27
 
 ### Added
@@ -39,3 +67,4 @@ All notable changes to Garmin Health Sync are documented here. The project follo
   credentials or known vulnerable production dependencies were found at release time.
 
 [0.11.0]: https://github.com/aarogozin/garmin-health-sync/releases/tag/v0.11.0
+[1.0.0]: https://github.com/aarogozin/garmin-health-sync/releases/tag/v1.0.0

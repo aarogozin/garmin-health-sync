@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 import requests
+from renpho import RenphoAPIError
 
 from garmin_sync.activities import RenphoActivityTemplate
 from garmin_sync.models import BERLIN
@@ -87,6 +88,44 @@ def test_fetch_sorts_newest_and_counts_bad_records() -> None:
     items, skipped = RenphoCloud(Credentials(), Items).fetch()
     assert [item.source_id for item in items] == ["2", "1"]
     assert skipped == 1
+
+
+def test_fetch_reauthenticates_once_when_cached_session_is_rejected() -> None:
+    instances: list[FakeAPI] = []
+
+    class ExpiringSession(FakeAPI):
+        def __init__(self, *_: Any, **__: Any) -> None:
+            super().__init__()
+            self.index = len(instances)
+            instances.append(self)
+
+        def get_all_measurements(self) -> list[dict[str, Any]]:
+            if self.index == 0:
+                raise RenphoAPIError("Measurements", 102, "session rejected")
+            return [{"id": 7, "timeStamp": 1_800_000_000, "weight": 79}]
+
+    items, skipped = RenphoCloud(Credentials(), ExpiringSession).fetch()
+
+    assert [item.source_id for item in items] == ["7"]
+    assert skipped == 0
+    assert len(instances) == 2
+
+
+def test_fetch_does_not_loop_when_refreshed_session_is_rejected() -> None:
+    calls = 0
+
+    class RejectedSession(FakeAPI):
+        def __init__(self, *_: Any, **__: Any) -> None:
+            nonlocal calls
+            super().__init__()
+            calls += 1
+
+        def get_all_measurements(self) -> list[dict[str, Any]]:
+            raise RenphoAPIError("Measurements", 102, "session rejected")
+
+    with pytest.raises(RenphoError, match="refreshed measurement session"):
+        RenphoCloud(Credentials(), RejectedSession).fetch()
+    assert calls == 2
 
 
 def test_authentication_requires_credentials() -> None:

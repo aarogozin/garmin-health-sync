@@ -1,0 +1,273 @@
+{
+  "$defs": {
+    "ActivityPreviewRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "period": {
+          "enum": [
+            "day",
+            "month",
+            "all"
+          ],
+          "title": "Period",
+          "type": "string"
+        }
+      },
+      "required": [
+        "period"
+      ],
+      "title": "ActivityPreviewRequest",
+      "type": "object"
+    },
+    "ApiEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Data"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApiError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ApiEnvelope",
+      "type": "object"
+    },
+    "ApiError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "ApiError",
+      "type": "object"
+    },
+    "DashboardRefreshRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "period_days": {
+          "default": 7,
+          "enum": [
+            1,
+            7,
+            30
+          ],
+          "title": "Period Days",
+          "type": "integer"
+        }
+      },
+      "title": "DashboardRefreshRequest",
+      "type": "object"
+    },
+    "GarminLoginRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "email": {
+          "maxLength": 320,
+          "minLength": 3,
+          "title": "Email",
+          "type": "string"
+        },
+        "password": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Password",
+          "type": "string"
+        }
+      },
+      "required": [
+        "email",
+        "password"
+      ],
+      "title": "GarminLoginRequest",
+      "type": "object"
+    },
+    "MfaRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "maxLength": 16,
+          "minLength": 4,
+          "pattern": "^[0-9A-Za-z-]+$",
+          "title": "Code",
+          "type": "string"
+        },
+        "job_id": {
+          "maxLength": 64,
+          "minLength": 16,
+          "title": "Job Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id",
+        "code"
+      ],
+      "title": "MfaRequest",
+      "type": "object"
+    },
+    "PressureRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "diastolic": {
+          "maximum": 150,
+          "minimum": 40,
+          "title": "Diastolic",
+          "type": "integer"
+        },
+        "measured_at": {
+          "format": "date-time",
+          "title": "Measured At",
+          "type": "string"
+        },
+        "notes": {
+          "default": "",
+          "maxLength": 500,
+          "title": "Notes",
+          "type": "string"
+        },
+        "pulse": {
+          "maximum": 250,
+          "minimum": 20,
+          "title": "Pulse",
+          "type": "integer"
+        },
+        "systolic": {
+          "maximum": 260,
+          "minimum": 70,
+          "title": "Systolic",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "measured_at",
+        "systolic",
+        "diastolic",
+        "pulse"
+      ],
+      "title": "PressureRequest",
+      "type": "object"
+    },
+    "RenphoLoginRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "email": {
+          "maxLength": 320,
+          "minLength": 3,
+          "title": "Email",
+          "type": "string"
+        },
+        "password": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Password",
+          "type": "string"
+        }
+      },
+      "required": [
+        "email",
+        "password"
+      ],
+      "title": "RenphoLoginRequest",
+      "type": "object"
+    },
+    "ScheduleRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "hour": {
+          "maximum": 23,
+          "minimum": 0,
+          "title": "Hour",
+          "type": "integer"
+        },
+        "minute": {
+          "maximum": 59,
+          "minimum": 0,
+          "title": "Minute",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hour",
+        "minute"
+      ],
+      "title": "ScheduleRequest",
+      "type": "object"
+    },
+    "SyncPreviewRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "latest",
+            "all"
+          ],
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "SyncPreviewRequest",
+      "type": "object"
+    },
+    "WeeklyReportRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "include_routes": {
+          "default": false,
+          "title": "Include Routes",
+          "type": "boolean"
+        },
+        "map_tiles_enabled": {
+          "default": false,
+          "title": "Map Tiles Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "WeeklyReportRequest",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GarminHealthSyncApi"
+}
