@@ -99,6 +99,25 @@ def test_connect_requires_saved_session() -> None:
         GarminClient(MemoryStore(), FakeAPI).connect()
 
 
+def test_profile_prefers_human_name_over_social_profile_uuid() -> None:
+    class ProfileSession(FakeSession):
+        def connectapi(self, _path: str) -> dict[str, str]:
+            return {
+                "displayName": "cfbd24d5-8288-46ac-ba3c-2b9dad071251",
+                "fullName": "Different Name",
+            }
+
+    class ProfileAPI(FakeAPI):
+        def __init__(self, *_: Any, **__: Any) -> None:
+            super().__init__()
+            self.client = ProfileSession()
+
+    client = GarminClient(MemoryStore("x" * 600), ProfileAPI)
+    profile = client.profile()
+    assert profile.display_name == "Test User"
+    assert profile.initials == "TU"
+
+
 def test_all_time_activities_are_paginated() -> None:
     class Paged(FakeAPI):
         def get_activities(self, start: int = 0, limit: int = 20):

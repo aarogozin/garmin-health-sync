@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic, sleep
 from typing import Any, Protocol, TypeVar, cast
+from uuid import UUID
 
 from garminconnect import (
     Garmin,
@@ -129,7 +130,11 @@ class GarminClient:
             raise self._translate(exc, "Could not read Garmin profile") from exc
         if not isinstance(raw, dict):
             raise GarminSyncError("Garmin returned an unreadable profile")
-        display_name = str(raw.get("displayName") or raw.get("fullName") or "Garmin user").strip()
+        display_name = _profile_display_name(
+            api.full_name,
+            raw.get("fullName"),
+            raw.get("displayName"),
+        )
         words = [word for word in display_name.split() if word]
         initials = "".join(word[0] for word in words[:2]).upper() or "G"
         avatar = raw.get("profileImageUrlMedium") or raw.get("profileImageUrlSmall")
@@ -388,6 +393,21 @@ class GarminClient:
         if isinstance(translated, AuthenticationRequired | RateLimited):
             return translated
         return UploadUncertain("The upload result is unknown; check Garmin Connect before retrying")
+
+
+def _profile_display_name(*candidates: Any) -> str:
+    """Prefer Garmin's human name and never expose its opaque profile UUID."""
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        value = candidate.strip()
+        if not value:
+            continue
+        try:
+            UUID(value)
+        except ValueError:
+            return value
+    return "Garmin user"
 
 
 def _body_records(data: dict[str, Any]) -> list[dict[str, Any]]:
