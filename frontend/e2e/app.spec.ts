@@ -4,13 +4,14 @@ import { expect, test, type Page } from '@playwright/test'
 const bootstrap = (connected: boolean) => ({
   status: 'success',
   data: {
-    version: '1.0.0', csrf_token: 'browser-test-token', timezone: 'Europe/Berlin', busy: false,
+    version: '1.1.0', csrf_token: 'browser-test-token', timezone: 'Europe/Berlin', busy: false,
     sources: {
       garmin: { connected, label: 'Garmin Connect', detail: connected ? 'Connected: Test User' : 'No saved Garmin session' },
       renpho: { connected: false, label: 'RENPHO', detail: 'Not connected' },
     },
     capabilities: { gui_auth: true, renpho_auth: true, weekly_report: true },
     latest_weekly_report_id: null,
+    profile: null,
   },
 })
 
@@ -19,9 +20,11 @@ async function mockApi(page: Page, connected = true) {
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('/bootstrap')) return route.fulfill({ json: bootstrap(connected) })
     if (path.endsWith('/dashboard')) return route.fulfill({ json: { status: 'success', data: { latest_body: null, report: null, events: [] } } })
+    if (path.endsWith('/dashboard/refresh')) return route.fulfill({ json: { status: 'success', data: { job_id: 'dashboard-job', kind: 'dashboard' } } })
+    if (path.endsWith('/jobs/dashboard-job')) return route.fulfill({ json: { status: 'success', data: { id: 'dashboard-job', state: 'verified' } } })
     if (path.endsWith('/schedule')) return route.fulfill({ json: { status: 'success', data: { supported: false, installed: false, loaded: false, legacy: false } } })
     if (path.endsWith('/pressure/preview')) return route.fulfill({ json: { status: 'success', data: { summary: '120/80 mmHg' } } })
-    return route.fulfill({ json: { status: 'success', data: [] } })
+    return route.fulfill({ status: 404, json: { status: 'error', error: { message: 'Unmocked test endpoint' } } })
   })
 }
 

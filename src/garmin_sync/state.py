@@ -9,6 +9,7 @@ from typing import Any
 
 
 def default_state_path() -> Path:
+    """Keep the duplicate-protection ledger in configured container or native application data."""
     if data_dir := os.environ.get("GARMIN_SYNC_DATA_DIR"):
         return Path(data_dir) / "state.json"
     return Path.home() / "Library" / "Application Support" / "garmin-health-sync" / "state.json"
@@ -25,6 +26,7 @@ class SyncState:
         self.path = path or default_state_path()
 
     def synced_ids(self) -> set[str]:
+        """Load confirmed RENPHO source IDs; a missing ledger represents a fresh installation."""
         try:
             data: Any = json.loads(self.path.read_text())
         except FileNotFoundError:
@@ -35,6 +37,7 @@ class SyncState:
         return {str(value) for value in values}
 
     def mark_synced(self, source_id: str) -> None:
+        """Atomically record a verified upload; callers serialize updates with the write lock."""
         self._update("renpho_synced_ids", source_id)
 
     def _update(self, key: str, source_id: str) -> None:

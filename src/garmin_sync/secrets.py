@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import tempfile
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Protocol
 
@@ -120,6 +122,25 @@ class EncryptedFileSecretStore:
             return {}
         return {str(key): str(item) for key, item in value.items()}
 
+    @contextmanager
+    def _transaction(self) -> Iterator[None]:
+        """Serialize local credential updates independently of the cloud-upload lock."""
+        descriptor: int | None = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            lock_path = self.path.with_name(f"{self.path.name}.lock")
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.fchmod(descriptor, 0o600)
+            # Lock a stable sidecar inode: the encrypted document is replaced atomically.
+            # Keep this critical section local; no vendor calls or MFA occur inside it.
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        except OSError as exc:
+            raise SecretStoreError("Could not lock the encrypted credential store") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
     def _write(self, values: dict[str, str]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = self._cipher.encrypt(json.dumps(values).encode())
@@ -138,9 +159,11 @@ class EncryptedFileSecretStore:
         return self._read().get("garmin_token")
 
     def save_token(self, token: str) -> None:
-        values = self._read()
-        values["garmin_token"] = token
-        self._write(values)
+        """Replace the encrypted Garmin token while retaining other stored credential fields."""
+        with self._transaction():
+            values = self._read()
+            values["garmin_token"] = token
+            self._write(values)
 
     def load_renpho(self) -> tuple[str, str] | None:
         values = self._read()
@@ -148,18 +171,22 @@ class EncryptedFileSecretStore:
         return (email, password) if email and password else None
 
     def save_renpho(self, email: str, password: str) -> None:
-        values = self._read()
-        values.update(renpho_email=email, renpho_password=password)
-        self._write(values)
+        """Replace the RENPHO credential pair within the shared encrypted document."""
+        with self._transaction():
+            values = self._read()
+            values.update(renpho_email=email, renpho_password=password)
+            self._write(values)
 
     def delete_keys(self, *keys: str) -> bool:
-        values = self._read()
-        removed = any(key in values for key in keys)
-        for key in keys:
-            values.pop(key, None)
-        if removed:
-            self._write(values)
-        return removed
+        """Remove only the requested credential fields and report whether any existed."""
+        with self._transaction():
+            values = self._read()
+            removed = any(key in values for key in keys)
+            for key in keys:
+                values.pop(key, None)
+            if removed:
+                self._write(values)
+            return removed
 
 
 class EncryptedFileTokenStore:

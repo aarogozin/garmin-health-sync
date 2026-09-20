@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { Activity, BatteryCharging, BedDouble, GripVertical, HeartPulse, RefreshCw, Settings2, Sparkles, Weight } from 'lucide-react'
+import { Activity, BatteryCharging, BedDouble, Gauge, GripVertical, HeartPulse, RefreshCw, Settings2, Sparkles, Weight } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { MetricChart } from '../components/MetricChart'
@@ -10,14 +10,24 @@ import { EmptyState, PageHeader } from '../components/Common'
 import { useJobs } from '../jobs'
 import type { Dashboard, WeeklyReport } from '../types'
 
-const defaultOrder = ['sleep', 'battery', 'heart', 'stress']
+const defaultOrder = ['sleep', 'battery', 'heart', 'stress', 'vo2max']
+
+/** Preserve a user's card order while making newly introduced cards visible once. */
+function dashboardOrder(value: string | null): string[] {
+  try {
+    const saved = JSON.parse(value ?? 'null')
+    if (!Array.isArray(saved)) return defaultOrder
+    const known = saved.filter((item): item is string => typeof item === 'string' && defaultOrder.includes(item))
+    return [...known, ...defaultOrder.filter((item) => !known.includes(item))]
+  } catch { return defaultOrder }
+}
 
 export function Overview() {
   const [period, setPeriod] = useState<1 | 7 | 30>(7)
   const { data } = useQuery({ queryKey: ['dashboard', period], queryFn: () => api<Dashboard>(`/dashboard?period_days=${period}`) })
   const { start, busy } = useJobs()
   const [customizing, setCustomizing] = useState(false)
-  const [order, setOrder] = useState<string[]>(() => { try { return JSON.parse(window.localStorage.getItem('garmin-health-sync.ui.v1.dashboard') ?? 'null') ?? defaultOrder } catch { return defaultOrder } })
+  const [order, setOrder] = useState<string[]>(() => { try { return dashboardOrder(window.localStorage.getItem('garmin-health-sync.ui.v1.dashboard')) } catch { return defaultOrder } })
   const sensors = useSensors(useSensor(PointerSensor), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }))
   const cards = useMemo(() => scoreCards(data?.report), [data?.report])
   const chart = data?.report?.charts.charts.find((item) => item.id === 'stress-battery')
@@ -35,12 +45,13 @@ export function Overview() {
 
 function scoreCards(report?: WeeklyReport | null): Record<string, { label: string; value: string; detail: string; icon: any; tone: string }> {
   const latest = (chartId: string, series: string) => { const chart = report?.charts.charts.find((item) => item.id === chartId); const values = chart?.series.find((item) => item.name === series)?.values.filter((item) => item != null) ?? []; return values.at(-1) }
-  const sleep = latest('sleep-score', 'Sleep score'); const battery = latest('stress-battery', 'Body Battery'); const minHr = latest('heart-rate', 'Daily minimum HR'); const stress = latest('stress-battery', 'Stress')
+  const sleep = latest('sleep-score', 'Sleep score'); const battery = latest('stress-battery', 'Body Battery'); const minHr = latest('heart-rate', 'Daily minimum HR'); const stress = latest('stress-battery', 'Stress'); const vo2max = report?.vo2_max
   return {
     sleep: { label: 'Sleep', value: sleep == null ? '—' : String(Math.round(sleep)), detail: 'Latest sleep score', icon: BedDouble, tone: 'indigo' },
     battery: { label: 'Body Battery', value: battery == null ? '—' : String(Math.round(battery)), detail: 'Charged today', icon: BatteryCharging, tone: 'teal' },
     heart: { label: 'Daily minimum HR', value: minHr == null ? '—' : `${Math.round(minHr)} bpm`, detail: 'Resting HR unavailable', icon: HeartPulse, tone: 'blue' },
     stress: { label: 'Stress', value: stress == null ? '—' : String(Math.round(stress)), detail: 'Daily average', icon: Activity, tone: 'amber' },
+    vo2max: { label: 'VO₂ max', value: vo2max == null ? '—' : `${vo2max.toFixed(1)} mL/kg/min`, detail: 'Garmin estimate', icon: Gauge, tone: 'blue' },
   }
 }
 

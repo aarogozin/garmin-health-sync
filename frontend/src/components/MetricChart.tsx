@@ -15,6 +15,7 @@ function value(input: number | null, formatter: string, unit: string) {
   return `${input.toFixed(digits)}${unit ? ` ${unit}` : ''}`
 }
 
+/** Render the server's axis-aware chart contract with an equivalent accessible data table. */
 export function MetricChart({ chart, compact = false }: { chart: ChartSpec; compact?: boolean }) {
   const target = useRef<HTMLDivElement>(null)
   useEffect(() => {

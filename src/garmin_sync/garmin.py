@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -58,11 +56,11 @@ class GarminAPI(Protocol):
     ) -> dict[str, Any]: ...
     def get_blood_pressure(self, startdate: str, enddate: str | None = None) -> dict[str, Any]: ...
     def get_activities_by_date(self, startdate: str, enddate: str) -> list[dict[str, Any]]: ...
-    def get_activities(self, start: int = 0, limit: int = 20) -> Any: ...
     def get_stats_and_body(self, cdate: str) -> dict[str, Any]: ...
     def get_sleep_data(self, cdate: str) -> dict[str, Any]: ...
     def get_training_readiness(self, cdate: str) -> list[dict[str, Any]]: ...
     def get_training_status(self, cdate: str) -> dict[str, Any]: ...
+    def get_max_metrics(self, cdate: str) -> dict[str, Any]: ...
     def get_body_battery(self, startdate: str, enddate: str) -> list[dict[str, Any]]: ...
     def get_stress_data(self, cdate: str) -> dict[str, Any]: ...
     def get_hrv_data(self, cdate: str) -> dict[str, Any] | None: ...
@@ -73,12 +71,13 @@ class GarminAPI(Protocol):
     def get_lifestyle_logging_data(self, cdate: str) -> dict[str, Any]: ...
     def get_all_day_events(self, cdate: str) -> dict[str, Any]: ...
     def get_activity_details(self, activity_id: str) -> dict[str, Any]: ...
+    def get_activity_exercise_sets(self, activity_id: int | str) -> dict[str, Any]: ...
+    def get_activity_splits(self, activity_id: str) -> dict[str, Any]: ...
+    def get_activity_typed_splits(self, activity_id: str) -> dict[str, Any]: ...
     def get_endurance_score(self, startdate: str, enddate: str) -> dict[str, Any]: ...
     def get_hill_score(self, startdate: str, enddate: str) -> dict[str, Any]: ...
     def get_race_predictions(self, startdate: str, enddate: str) -> dict[str, Any]: ...
-    def get_running_tolerance(
-        self, startdate: str, enddate: str
-    ) -> list[dict[str, Any]]: ...
+    def get_running_tolerance(self, startdate: str, enddate: str) -> list[dict[str, Any]]: ...
     def get_devices(self) -> list[dict[str, Any]]: ...
     def get_goals(self) -> list[dict[str, Any]]: ...
     def get_personal_record(self) -> dict[str, Any]: ...
@@ -99,16 +98,24 @@ class GarminClient:
         self._read_cache: dict[str, tuple[float, Any]] = {}
 
     def login(self, email: str, password: str, mfa_prompt: Callable[[], str]) -> str:
+        """Authenticate interactively and persist the serialized OAuth session, not the password."""
         api = self._factory(email, password, prompt_mfa=mfa_prompt)
         try:
             api.login()
             self._token_store.save(api.client.dumps())
+            self.clear_session()
             self._api = api
             return api.full_name or api.get_full_name() or email
         except Exception as exc:
             raise self._translate(exc, "Login failed") from exc
 
+    def clear_session(self) -> None:
+        """Discard the active account and all cached health reads without deleting credentials."""
+        self._api = None
+        self._read_cache.clear()
+
     def connect(self) -> str:
+        """Restore and refresh the saved OAuth session before installing the active client."""
         token = self._token_store.load()
         if not token:
             raise AuthenticationRequired("No saved Garmin session. Run 'garmin-sync login'.")
@@ -141,6 +148,7 @@ class GarminClient:
         return GarminProfile(display_name, initials, avatar if isinstance(avatar, str) else None)
 
     def add_body_composition(self, measurement: BodyComposition) -> None:
+        """Upload once, then verify the exact timestamp and weight using read-only retries."""
         api = self._connected_api()
         try:
             upload = api.add_body_composition(**measurement.garmin_kwargs())
@@ -171,16 +179,23 @@ class GarminClient:
         return False
 
     def has_body_composition(self, measurement: BodyComposition) -> bool:
-        api = self._connected_api()
-        data = api.get_body_composition(measurement.measured_at.date().isoformat())
+        """Check timestamp and weight tolerances against Garmin's records for the same date."""
+        data = self._read(
+            lambda api: api.get_body_composition(measurement.measured_at.date().isoformat()),
+            "body composition",
+        )
         return _has_exact_body_record(data, measurement)
 
     def has_body_composition_on_date(self, measurement: BodyComposition) -> bool:
-        api = self._connected_api()
-        data = api.get_body_composition(measurement.measured_at.date().isoformat())
+        """Detect any same-day entry so callers can avoid overwriting conflicting data."""
+        data = self._read(
+            lambda api: api.get_body_composition(measurement.measured_at.date().isoformat()),
+            "body composition",
+        )
         return bool(_body_records(data))
 
     def add_blood_pressure(self, measurement: BloodPressure) -> None:
+        """Skip exact duplicates, submit once, and require a matching read-back record."""
         api = self._connected_api()
         if self.has_blood_pressure(measurement):
             return
@@ -207,56 +222,15 @@ class GarminClient:
             )
 
     def has_blood_pressure(self, measurement: BloodPressure) -> bool:
-        api = self._connected_api()
-        data = api.get_blood_pressure(measurement.measured_at.date().isoformat())
+        """Require a matching timestamp and all three pressure-reading values."""
+        data = self._read(
+            lambda api: api.get_blood_pressure(measurement.measured_at.date().isoformat()),
+            "blood pressure",
+        )
         return _has_exact_pressure_record(data, measurement)
 
     def read_activities(self, startdate: str, enddate: str) -> list[dict[str, Any]]:
         return self._read(lambda api: api.get_activities_by_date(startdate, enddate), "activities")
-
-    def read_all_activities(self, *, page_size: int = 100) -> list[dict[str, Any]]:
-        api = self._connected_api()
-        result: list[dict[str, Any]] = []
-        seen_ids: set[str] = set()
-        seen_pages: set[str] = set()
-        start = 0
-        while True:
-            try:
-                response = api.get_activities(start, page_size)
-            except Exception as exc:
-                raise self._translate(exc, "Could not read all-time activities") from exc
-            page_value = (
-                response.get("activityList", []) if isinstance(response, dict) else response
-            )
-            page = (
-                [item for item in page_value if isinstance(item, dict)]
-                if isinstance(page_value, list)
-                else []
-            )
-            if not page:
-                break
-            signature = hashlib.sha256(
-                json.dumps(page, sort_keys=True, default=str).encode()
-            ).hexdigest()
-            if signature in seen_pages:
-                raise GarminSyncError("Garmin activity pagination did not advance")
-            seen_pages.add(signature)
-            new_items: list[dict[str, Any]] = []
-            for item in page:
-                activity_id = item.get("activityId")
-                if activity_id is not None:
-                    normalized_id = str(activity_id)
-                    if normalized_id in seen_ids:
-                        continue
-                    seen_ids.add(normalized_id)
-                new_items.append(item)
-            if not new_items:
-                raise GarminSyncError("Garmin activity pagination did not advance")
-            result.extend(new_items)
-            start += len(page)
-            if len(page) < page_size:
-                break
-        return result
 
     def read_blood_pressure(self, startdate: str, enddate: str) -> dict[str, Any]:
         return self._read(lambda api: api.get_blood_pressure(startdate, enddate), "blood pressure")
@@ -277,6 +251,12 @@ class GarminClient:
 
     def read_training_status(self, cdate: str) -> dict[str, Any]:
         return self._read(lambda api: api.get_training_status(cdate), "training status")
+
+    def read_max_metrics(self, cdate: str) -> dict[str, Any]:
+        """Read Garmin's device-derived maximum metrics, including VO₂ max when available."""
+        return self._cached(
+            f"max-metrics:{cdate}", lambda api: api.get_max_metrics(cdate), "maximum metrics"
+        )
 
     def read_body_battery(self, startdate: str, enddate: str) -> list[dict[str, Any]]:
         return self._read(lambda api: api.get_body_battery(startdate, enddate), "Body Battery")
@@ -326,7 +306,32 @@ class GarminClient:
             "activity details",
         )
 
+    def read_activity_exercise_sets(self, activity_id: str) -> dict[str, Any]:
+        """Read recorded strength sets without mutating the Garmin activity."""
+        return self._cached(
+            f"activity-exercises:{activity_id}",
+            lambda api: api.get_activity_exercise_sets(activity_id),
+            "activity exercise sets",
+        )
+
+    def read_activity_splits(self, activity_id: str) -> dict[str, Any]:
+        """Read activity splits without downloading route or FIT data."""
+        return self._cached(
+            f"activity-splits:{activity_id}",
+            lambda api: api.get_activity_splits(activity_id),
+            "activity splits",
+        )
+
+    def read_activity_typed_splits(self, activity_id: str) -> dict[str, Any]:
+        """Read multisport discipline splits without downloading route data."""
+        return self._cached(
+            f"activity-typed-splits:{activity_id}",
+            lambda api: api.get_activity_typed_splits(activity_id),
+            "activity typed splits",
+        )
+
     def read_extended(self, startdate: str, enddate: str) -> tuple[dict[str, Any], list[str]]:
+        """Read optional domains independently, but propagate authentication and rate limits."""
         operations: dict[str, Callable[[GarminAPI], Any]] = {
             "endurance_score": lambda api: api.get_endurance_score(startdate, enddate),
             "hill_score": lambda api: api.get_hill_score(startdate, enddate),
@@ -431,18 +436,6 @@ def _upload_processed(upload: dict[str, Any]) -> bool:
         return False
     successes = result.get("successes")
     return successes is None or bool(successes)
-
-
-def _contains_mapping(value: Any, expected: dict[str, int]) -> bool:
-    """Find one nested record containing all expected fields and values."""
-    if isinstance(value, dict):
-        normalized = {str(key).lower(): item for key, item in value.items()}
-        if all(normalized.get(key) == item for key, item in expected.items()):
-            return True
-        return any(_contains_mapping(item, expected) for item in value.values())
-    if isinstance(value, list | tuple):
-        return any(_contains_mapping(item, expected) for item in value)
-    return False
 
 
 def _pressure_records(value: Any) -> list[dict[str, Any]]:

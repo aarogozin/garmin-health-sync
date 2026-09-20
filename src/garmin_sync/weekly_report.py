@@ -8,6 +8,7 @@ from typing import Any
 
 from .models import BERLIN
 from .renpho import RenphoMeasurement
+from .renpho_report import RenphoReportData
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,7 @@ class PressureReading:
     systolic: int
     diastolic: int
     pulse: int | None
+    notes: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +84,7 @@ class BodyMeasurementPoint:
     body_fat_pct: float | None
     muscle_mass_kg: float | None
     source: str
+    report: RenphoReportData | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,12 +167,41 @@ class RoutePoint:
 
 
 @dataclass(frozen=True, slots=True)
+class ExerciseSet:
+    exercise_name: str | None
+    category: str | None
+    set_number: int | None
+    repetitions: float | None
+    weight_kg: float | None
+    duration_seconds: float | None
+    set_type: str | None
+    is_warmup: bool | None = None
+    rir: float | None = None
+    rpe: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActivitySplit:
+    split_number: int | None
+    duration_seconds: float | None
+    distance_km: float | None
+    average_hr: float | None
+    average_power: float | None
+    average_cadence: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class ActivityDetail:
     activity_id: str
     location_name: str | None
     elevation_gain: float | None
     average_power: float | None
     route: tuple[RoutePoint, ...]
+    average_cadence: float | None = None
+    exercises: tuple[ExerciseSet, ...] = ()
+    splits: tuple[ActivitySplit, ...] = ()
+    component_types: tuple[str, ...] = ()
+    exercise_sets_available: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +213,10 @@ class HydrationNutrition:
     protein_g: float | None
     carbs_g: float | None
     fat_g: float | None
+    nutrition_goal_calories: float | None = None
+    protein_goal_g: float | None = None
+    carbs_goal_g: float | None = None
+    fat_goal_g: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,8 +292,14 @@ class WeeklyHealthReport:
     pressure: PressureSeries
     body: tuple[BodyMeasurementPoint, ...]
     training_status: str | None
+    vo2_max: float | None
     insights: tuple[WeeklyInsight, ...]
     comprehensive: ComprehensiveMetrics
+
+    @property
+    def period_days(self) -> int:
+        """Return the inclusive calendar span, independent of local DST transitions."""
+        return (self.end_date - self.start_date).days + 1
 
     @property
     def total_training_minutes(self) -> float:
@@ -274,6 +316,7 @@ def build_report(
     unavailable: list[str],
     generated_at: datetime | None = None,
 ) -> WeeklyHealthReport:
+    """Normalize collected source data into the model shared by web, PDF and archive views."""
     activities = tuple(_activities(garmin.get("activities", [])))
     recovery = tuple(_recovery(start_date, end_date, garmin))
     pressure_readings = tuple(_pressure_readings(garmin.get("pressure", {})))
@@ -291,6 +334,7 @@ def build_report(
     )
     body = tuple(_merge_body(_garmin_body(garmin.get("body", {})), renpho, start_date, end_date))
     status = _training_status(garmin.get("training_status"))
+    vo2_max = _vo2_max(garmin.get("max_metrics"))
     report = WeeklyHealthReport(
         start_date,
         end_date,
@@ -301,6 +345,7 @@ def build_report(
         pressure,
         body,
         status,
+        vo2_max,
         (),
         _comprehensive(
             start_date,
@@ -322,6 +367,7 @@ def build_report(
         report.pressure,
         report.body,
         report.training_status,
+        report.vo2_max,
         tuple(_insights(report)),
         report.comprehensive,
     )
@@ -351,8 +397,7 @@ def _activities(raw: Any) -> list[ActivitySummary]:
                 _number(item.get("anaerobicTrainingEffect")),
                 _number(item.get("activityTrainingLoad")),
                 tuple(
-                    (_number(item.get(f"hrTimeInZone_{zone}")) or 0) / 60
-                    for zone in range(1, 6)
+                    (_number(item.get(f"hrTimeInZone_{zone}")) or 0) / 60 for zone in range(1, 6)
                 ),
                 _activity_id(item.get("activityId")),
             )
@@ -405,7 +450,15 @@ def _pressure_readings(raw: Any) -> list[PressureReading]:
         )
         systolic, diastolic = _integer(item.get("systolic")), _integer(item.get("diastolic"))
         if measured is not None and systolic is not None and diastolic is not None:
-            result.append(PressureReading(measured, systolic, diastolic, _integer(item.get("pulse"))))
+            result.append(
+                PressureReading(
+                    measured,
+                    systolic,
+                    diastolic,
+                    _integer(item.get("pulse")),
+                    _string(item.get("notes") or item.get("note")),
+                )
+            )
     return sorted(result, key=lambda item: item.measured_at)
 
 
@@ -451,7 +504,7 @@ def _merge_body(
             (
                 point
                 for point in points
-                if abs((point.measured_at - body.measured_at).total_seconds()) <= 2
+                if abs((point.measured_at - body.measured_at).total_seconds()) <= 120
                 and abs(point.weight_kg - body.weight) <= 0.05
             ),
             None,
@@ -462,6 +515,7 @@ def _merge_body(
             body.percent_fat,
             body.muscle_mass,
             "RENPHO",
+            item.report,
         )
         if match is None:
             points.append(renpho_point)
@@ -472,6 +526,7 @@ def _merge_body(
                 body.percent_fat if body.percent_fat is not None else match.body_fat_pct,
                 body.muscle_mass if body.muscle_mass is not None else match.muscle_mass_kg,
                 "RENPHO + Garmin",
+                item.report,
             )
     return sorted(points, key=lambda point: point.measured_at)
 
@@ -483,7 +538,11 @@ def _insights(report: WeeklyHealthReport) -> list[WeeklyInsight]:
     equivalent = moderate + vigorous * 2
     if equivalent:
         text = f"Garmin recorded {moderate} moderate and {vigorous} vigorous intensity minutes."
-        text += " This meets the WHO weekly minimum." if equivalent >= 150 else " This is below the WHO weekly minimum; if the device captured the full week, gradually adding activity is one option."
+        text += (
+            " This meets the WHO weekly minimum."
+            if equivalent >= 150
+            else " This is below the WHO weekly minimum; if the device captured the full week, gradually adding activity is one option."
+        )
         insights.append(WeeklyInsight("info", text, "Activity", "High", *WHO_ACTIVITY))
     strength_days = {
         activity.measured_at.date()
@@ -536,16 +595,52 @@ def _insights(report: WeeklyHealthReport) -> list[WeeklyInsight]:
         )
     if report.pressure.readings:
         if report.pressure.days_covered < 3:
-            insights.append(WeeklyInsight("caution", "Blood pressure coverage is too sparse for a meaningful weekly trend. For a more interpretable log, measure under consistent conditions and take two readings one minute apart when practical.", "Blood pressure", "High", *AHA_PRESSURE))
+            insights.append(
+                WeeklyInsight(
+                    "caution",
+                    "Blood pressure coverage is too sparse for a meaningful weekly trend. For a more interpretable log, measure under consistent conditions and take two readings one minute apart when practical.",
+                    "Blood pressure",
+                    "High",
+                    *AHA_PRESSURE,
+                )
+            )
         else:
-            insights.append(WeeklyInsight("info", f"Observed home blood pressure averaged {report.pressure.average_systolic:.0f}/{report.pressure.average_diastolic:.0f} mmHg across {report.pressure.days_covered} days. Only a clinician can interpret this in personal medical context.", "Blood pressure", "High", *AHA_PRESSURE))
+            insights.append(
+                WeeklyInsight(
+                    "info",
+                    f"Observed home blood pressure averaged {report.pressure.average_systolic:.0f}/{report.pressure.average_diastolic:.0f} mmHg across {report.pressure.days_covered} days. Only a clinician can interpret this in personal medical context.",
+                    "Blood pressure",
+                    "High",
+                    *AHA_PRESSURE,
+                )
+            )
     if report.pressure.has_extreme:
-        insights.append(WeeklyInsight("alert", "At least one reading exceeded 180 systolic or 120 diastolic. Repeat after at least one minute; contact a healthcare professional promptly if it remains very high, and seek emergency help if symptoms are present.", "Blood pressure", "High", *AHA_PRESSURE))
+        insights.append(
+            WeeklyInsight(
+                "alert",
+                "At least one reading exceeded 180 systolic or 120 diastolic. Repeat after at least one minute; contact a healthcare professional promptly if it remains very high, and seek emergency help if symptoms are present.",
+                "Blood pressure",
+                "High",
+                *AHA_PRESSURE,
+            )
+        )
     if len(report.body) >= 2:
         delta = report.body[-1].weight_kg - report.body[0].weight_kg
-        insights.append(WeeklyInsight("info", f"Scale weight changed {delta:+.1f} kg over the report window. Treat body-composition estimates as a trend and compare measurements taken under similar hydration, meal, exercise and time-of-day conditions.", "Body composition", "Moderate", *BIA_LIMITATIONS))
+        insights.append(
+            WeeklyInsight(
+                "info",
+                f"Scale weight changed {delta:+.1f} kg over the report window. Treat body-composition estimates as a trend and compare measurements taken under similar hydration, meal, exercise and time-of-day conditions.",
+                "Body composition",
+                "Moderate",
+                *BIA_LIMITATIONS,
+            )
+        )
     if not insights:
-        insights.append(WeeklyInsight("caution", "There is not enough data for a reliable weekly trend summary."))
+        insights.append(
+            WeeklyInsight(
+                "caution", "There is not enough data for a reliable weekly trend summary."
+            )
+        )
     return insights
 
 
@@ -565,66 +660,90 @@ def render_weekly_html(report: WeeklyHealthReport, csrf: str, report_id: str) ->
         + "</li>"
         for x in report.insights
     )
-    activities = "".join(
-        f"<tr><td>{x.measured_at:%a %H:%M}</td><td>"
-        + (
-            f"<a href='{e(garmin_activity_url(x.activity_id))}' target=_blank "
-            f"rel='noreferrer noopener'>{e(x.name)}</a>"
-            if garmin_activity_url(x.activity_id)
-            else e(x.name)
+    activities = (
+        "".join(
+            f"<tr><td>{x.measured_at:%a %H:%M}</td><td>"
+            + (
+                f"<a href='{e(garmin_activity_url(x.activity_id))}' target=_blank "
+                f"rel='noreferrer noopener'>{e(x.name)}</a>"
+                if garmin_activity_url(x.activity_id)
+                else e(x.name)
+            )
+            + f"</td><td>{x.duration_minutes:.0f} min</td>"
+            f"<td>{_fmt(x.distance_km, ' km')}</td>"
+            f"<td>{_fmt(x.average_hr, ' bpm')}</td></tr>"
+            for x in report.activities
         )
-        + f"</td><td>{x.duration_minutes:.0f} min</td>"
-        f"<td>{_fmt(x.distance_km, ' km')}</td>"
-        f"<td>{_fmt(x.average_hr, ' bpm')}</td></tr>"
-        for x in report.activities
-    ) or "<tr><td colspan=5>No activities available</td></tr>"
+        or "<tr><td colspan=5>No activities available</td></tr>"
+    )
     recovery = "".join(
         f"<tr><td>{x.day:%a %d}</td><td>{_fmt(x.steps)}</td><td>{_fmt(x.sleep_hours, ' h')}</td><td>{_fmt(x.resting_hr, ' bpm')}</td><td>{_fmt(x.stress)}</td><td>{_fmt(x.readiness_score)}</td></tr>"
         for x in report.recovery
     )
-    pressure = "".join(
-        f"<tr><td>{x.measured_at:%a %H:%M}</td><td>{x.systolic}/{x.diastolic}</td><td>{_fmt(x.pulse, ' bpm')}</td></tr>"
-        for x in report.pressure.readings
-    ) or "<tr><td colspan=3>No readings available</td></tr>"
-    pressure_daily = "".join(
-        f"<tr><td>{x.day:%a %d}</td><td>{x.systolic:.0f}/{x.diastolic:.0f}</td><td>{x.count}</td></tr>"
-        for x in report.pressure.daily_averages
-    ) or "<tr><td colspan=3>No daily averages available</td></tr>"
-    body = "".join(
-        f"<tr><td>{x.measured_at:%a %H:%M}</td><td>{x.weight_kg:.1f} kg</td><td>{_fmt(x.body_fat_pct, '%')}</td><td>{_fmt(x.muscle_mass_kg, ' kg')}</td><td>{e(x.source)}</td></tr>"
-        for x in report.body
-    ) or "<tr><td colspan=5>No measurements available</td></tr>"
+    pressure = (
+        "".join(
+            f"<tr><td>{x.measured_at:%a %H:%M}</td><td>{x.systolic}/{x.diastolic}</td><td>{_fmt(x.pulse, ' bpm')}</td></tr>"
+            for x in report.pressure.readings
+        )
+        or "<tr><td colspan=3>No readings available</td></tr>"
+    )
+    pressure_daily = (
+        "".join(
+            f"<tr><td>{x.day:%a %d}</td><td>{x.systolic:.0f}/{x.diastolic:.0f}</td><td>{x.count}</td></tr>"
+            for x in report.pressure.daily_averages
+        )
+        or "<tr><td colspan=3>No daily averages available</td></tr>"
+    )
+    body = (
+        "".join(
+            f"<tr><td>{x.measured_at:%a %H:%M}</td><td>{x.weight_kg:.1f} kg</td><td>{_fmt(x.body_fat_pct, '%')}</td><td>{_fmt(x.muscle_mass_kg, ' kg')}</td><td>{e(x.source)}</td></tr>"
+            for x in report.body
+        )
+        or "<tr><td colspan=5>No measurements available</td></tr>"
+    )
     chart_panels = "".join(
         f"<article class=chart-panel><h3>{e(chart.title)}</h3><div class=interactive-chart data-chart='{e(chart.chart_id)}' tabindex=0 role=img aria-label='{e(chart.title)}'></div></article>"
         for chart in report.comprehensive.charts
     )
-    lifestyle = "".join(
-        f"<tr><td>{day:%d %b}</td><td><div class=lifestyle-list>"
-        + "".join(f"<span class=lifestyle-chip>{e(label)}</span>" for label in labels)
-        + "</div></td></tr>"
-        for day, labels in group_lifestyle_events(report.comprehensive.lifestyle)
-    ) or "<tr><td colspan=2>No lifestyle events available</td></tr>"
-    associations = "".join(
-        f"<li><strong>{e(item.behavior)}</strong> and {e(item.metric)}: observed median difference {item.median_difference:+.1f} ({item.with_days} days with / {item.without_days} without). This is an association, not evidence of causation.</li>"
-        for item in report.comprehensive.associations
-    ) or "<li>Not enough repeated observations for behavior comparisons.</li>"
-    routes = "".join(
-        f"<article class=route-panel><h3>{e(item.location_name or 'Activity route')}</h3><div class=route-chart data-route='{e(item.activity_id)}' tabindex=0 role=img aria-label='Route for {e(item.location_name or item.activity_id)}'></div></article>"
-        for item in report.comprehensive.activity_details
-        if item.route
-    ) or "<p>No route data available.</p>"
-    extended = "".join(
-        f"<li><strong>{e(item.name)}</strong>: {e(item.summary)}</li>"
-        for item in report.comprehensive.extended
-    ) or "<li>No extended domains available.</li>"
+    lifestyle = (
+        "".join(
+            f"<tr><td>{day:%d %b}</td><td><div class=lifestyle-list>"
+            + "".join(f"<span class=lifestyle-chip>{e(label)}</span>" for label in labels)
+            + "</div></td></tr>"
+            for day, labels in group_lifestyle_events(report.comprehensive.lifestyle)
+        )
+        or "<tr><td colspan=2>No lifestyle events available</td></tr>"
+    )
+    associations = (
+        "".join(
+            f"<li><strong>{e(item.behavior)}</strong> and {e(item.metric)}: observed median difference {item.median_difference:+.1f} ({item.with_days} days with / {item.without_days} without). This is an association, not evidence of causation.</li>"
+            for item in report.comprehensive.associations
+        )
+        or "<li>Not enough repeated observations for behavior comparisons.</li>"
+    )
+    routes = (
+        "".join(
+            f"<article class=route-panel><h3>{e(item.location_name or 'Activity route')}</h3><div class=route-chart data-route='{e(item.activity_id)}' tabindex=0 role=img aria-label='Route for {e(item.location_name or item.activity_id)}'></div></article>"
+            for item in report.comprehensive.activity_details
+            if item.route
+        )
+        or "<p>No route data available.</p>"
+    )
+    extended = (
+        "".join(
+            f"<li><strong>{e(item.name)}</strong>: {e(item.summary)}</li>"
+            for item in report.comprehensive.extended
+        )
+        or "<li>No extended domains available.</li>"
+    )
     unavailable = ", ".join(report.availability.unavailable) or "None"
     return f"""
-<section class=hero><p class=eyebrow>PERSONAL HEALTH SUMMARY</p><h2>7-day health report</h2><p>{report.start_date:%d %b %Y} - {report.end_date:%d %b %Y}</p>
+<section class=hero><p class=eyebrow>PERSONAL HEALTH SUMMARY</p><h2>{report.period_days}-day health report</h2><p>{report.start_date:%d %b %Y} - {report.end_date:%d %b %Y}</p>
 <div class=metrics><div><strong>{len(report.activities)}</strong><span>workouts</span></div><div><strong>{report.total_training_minutes:.0f}</strong><span>training min</span></div><div><strong>{len(report.pressure.readings)}</strong><span>BP readings</span></div><div><strong>{len(report.body)}</strong><span>body records</span></div></div></section>
-<section><h2>Weekly overview</h2><ul>{insights}</ul><p><strong>Unavailable:</strong> {e(unavailable)}</p></section>
+<section><h2>Period overview</h2><ul>{insights}</ul><p><strong>Unavailable:</strong> {e(unavailable)}</p></section>
 <section><h2>Interactive health dashboard</h2><p>Use the legend to show or hide series. Focus or hover over a point for its value.</p><div class=chart-grid>{chart_panels}</div></section>
-<section><h2>Training</h2><div class=chart>{_bar_chart([x.duration_minutes for x in report.activities], '#4776e6')}</div><table><tr><th>Time</th><th>Activity</th><th>Duration</th><th>Distance</th><th>Avg HR</th></tr>{activities}</table></section>
-<section><h2>Recovery and activity</h2><table><tr><th>Day</th><th>Steps</th><th>Sleep</th><th>Resting HR</th><th>Stress</th><th>Readiness</th></tr>{recovery}</table><p><strong>Training status:</strong> {e(report.training_status or 'Not available')}</p></section>
+<section><h2>Training</h2><div class=chart>{_bar_chart([x.duration_minutes for x in report.activities], "#4776e6")}</div><table><tr><th>Time</th><th>Activity</th><th>Duration</th><th>Distance</th><th>Avg HR</th></tr>{activities}</table></section>
+<section><h2>Recovery and activity</h2><table><tr><th>Day</th><th>Steps</th><th>Sleep</th><th>Resting HR</th><th>Stress</th><th>Readiness</th></tr>{recovery}</table><p><strong>Training status:</strong> {e(report.training_status or "Not available")}</p></section>
 <section><h2>Blood pressure</h2>{_line_chart([(x.systolic, x.diastolic) for x in report.pressure.readings])}<p><strong>{e(report.pressure.esc_category)}</strong></p><h3>Daily averages</h3><table><tr><th>Day</th><th>Average</th><th>Readings</th></tr>{pressure_daily}</table><h3>All readings</h3><table><tr><th>Time</th><th>Blood pressure</th><th>Pulse</th></tr>{pressure}</table><p>Observed average: {_fmt(report.pressure.average_systolic)}/{_fmt(report.pressure.average_diastolic)} mmHg across {report.pressure.days_covered} day(s).</p></section>
 <section><h2>Weight and body composition</h2>{_sparkline([x.weight_kg for x in report.body])}<table><tr><th>Time</th><th>Weight</th><th>Body fat</th><th>Muscle</th><th>Source</th></tr>{body}</table></section>
 <section><h2>Lifestyle Logging - 30-day context</h2><table><tr><th>Date</th><th>Logged behaviors</th></tr>{lifestyle}</table><h3>Observed associations</h3><ul>{associations}</ul></section>
@@ -639,7 +758,10 @@ def _bar_chart(values: list[float], color: str) -> str:
     if not values:
         return "<p>No chart data</p>"
     maximum = max(values) or 1
-    bars = "".join(f"<span style='height:{max(4, value / maximum * 100):.1f}%;background:{color}' title='{value:.0f} min'></span>" for value in values)
+    bars = "".join(
+        f"<span style='height:{max(4, value / maximum * 100):.1f}%;background:{color}' title='{value:.0f} min'></span>"
+        for value in values
+    )
     return f"<div class=bars>{bars}</div>"
 
 
@@ -762,6 +884,31 @@ def _average(values: list[int]) -> float | None:
     return mean(values) if values else None
 
 
+def _vo2_max(raw: Any) -> float | None:
+    """Extract a plausible VO₂-max estimate from Garmin's nested max-metrics response."""
+    preferred: list[float] = []
+    fallback: list[float] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                normalized = "".join(char for char in str(key).lower() if char.isalnum())
+                number = _number(nested)
+                if number is not None and 10 <= number <= 100:
+                    if normalized in {"vo2maxprecisevalue", "vo2maxvalue"}:
+                        preferred.append(number)
+                    elif normalized == "vo2max":
+                        fallback.append(number)
+                visit(nested)
+        elif isinstance(value, list | tuple):
+            for nested in value:
+                visit(nested)
+
+    visit(raw)
+    values = preferred or fallback
+    return values[0] if values else None
+
+
 def _fmt(value: float | int | None, suffix: str = "") -> str:
     if value is None:
         return "Not available"
@@ -834,16 +981,23 @@ def _comprehensive(
         battery_item = _mapping(battery_raw.get(key))
         stress.append(_number(stress_item.get("avgStressLevel") or stat.get("averageStressLevel")))
         battery.append(_number(battery_item.get("charged")))
-        totals = _nutrition_totals(nutrition)
+        totals, goals = _nutrition_totals(nutrition)
+        consumed_water = _number(hyd.get("valueInML"))
+        if consumed_water is not None and consumed_water <= 0:
+            consumed_water = None
         hydration.append(
             HydrationNutrition(
                 current,
-                _number(hyd.get("valueInML")),
+                consumed_water,
                 _number(hyd.get("goalInML")),
                 totals[0],
                 totals[1],
                 totals[2],
                 totals[3],
+                goals[0],
+                goals[1],
+                goals[2],
+                goals[3],
             )
         )
     lifestyle = tuple(_lifestyle_events(raw.get("lifestyle", {})))
@@ -884,6 +1038,7 @@ def _comprehensive(
 
 
 def chart_payload(report: WeeklyHealthReport) -> dict[str, Any]:
+    """Serialize chart axes, nullable series and opt-in routes for both browser renderers."""
     return {
         "charts": [
             {
@@ -959,36 +1114,296 @@ def _chart_specs(
     activity_days = {
         day: [item for item in activities if item.measured_at.date() == day] for day in days
     }
+
     def axis(
-        axis_id: str, label: str, unit: str, formatter: str, minimum: float | None = None,
-        maximum: float | None = None, scale: bool = True,
+        axis_id: str,
+        label: str,
+        unit: str,
+        formatter: str,
+        minimum: float | None = None,
+        maximum: float | None = None,
+        scale: bool = True,
     ) -> ChartAxisSpec:
         return ChartAxisSpec(axis_id, label, unit, formatter, minimum, maximum, scale)
 
     def series(
-        series_id: str, name: str, values: tuple[float | None, ...], axis_id: str,
-        color_token: str, render_type: str = "line", source: str = "Garmin",
+        series_id: str,
+        name: str,
+        values: tuple[float | None, ...],
+        axis_id: str,
+        color_token: str,
+        render_type: str = "line",
+        source: str = "Garmin",
     ) -> ChartSeries:
         return ChartSeries(series_id, name, values, axis_id, render_type, color_token, source)
 
     return (
-        ChartSpec("stress-battery", "Stress and Body Battery", timestamps, (axis("score", "Score", "score", "integer", 0, 100, False),), (series("stress", "Stress", tuple(stress), "score", "stress"), series("body-battery", "Body Battery", tuple(battery), "score", "battery"))),
-        ChartSpec("sleep-duration", "Sleep duration and stages", timestamps, (axis("hours", "Hours", "h", "one_decimal", 0),), (series("sleep-duration", "Sleep duration", tuple(x.sleep_hours for x in recovery), "hours", "sleep", "bar"), series("deep-sleep", "Deep sleep", tuple(x.deep_hours for x in sleep), "hours", "deep"), series("rem-sleep", "REM sleep", tuple(x.rem_hours for x in sleep), "hours", "rem"))),
-        ChartSpec("sleep-score", "Sleep score", timestamps, (axis("score", "Score", "score", "integer", 0, 100, False),), (series("sleep-score", "Sleep score", tuple(x.sleep_score for x in recovery), "score", "sleep"),)),
-        ChartSpec("hrv", "Overnight HRV", timestamps, (axis("hrv", "HRV", "ms", "integer"),), (series("overnight-hrv", "Overnight HRV", tuple(x.overnight_hrv for x in sleep), "hrv", "violet"),)),
-        ChartSpec("heart-rate", "Heart rate", timestamps, (axis("bpm", "Heart rate", "bpm", "integer"),), (series("min-hr", "Daily minimum HR", tuple(x.min_hr for x in health), "bpm", "blue"), series("max-hr", "Daily maximum HR", tuple(x.max_hr for x in health), "bpm", "red"))),
-        ChartSpec("spo2", "Sleep SpO₂", timestamps, (axis("percent", "SpO₂", "%", "one_decimal", 80, 100, False),), (series("spo2", "Sleep SpO₂", tuple(x.spo2 for x in sleep), "percent", "cyan"),)),
-        ChartSpec("respiration", "Sleep respiration", timestamps, (axis("breaths", "Respiration", "breaths/min", "one_decimal"),), (series("respiration", "Sleep respiration", tuple(x.respiration for x in sleep), "breaths", "violet"),)),
-        ChartSpec("steps", "Steps", timestamps, (axis("steps", "Steps", "steps", "integer", 0),), (series("steps", "Steps", tuple(x.steps for x in recovery), "steps", "blue", "bar"),)),
-        ChartSpec("calories", "Calories", timestamps, (axis("kcal", "Calories", "kcal", "integer", 0),), (series("calories", "Calories", tuple(x.calories for x in health), "kcal", "amber", "bar"),)),
-        ChartSpec("intensity-minutes", "Intensity minutes", timestamps, (axis("minutes", "Minutes", "min", "integer", 0),), (series("intensity-minutes", "Intensity minutes", tuple((x.moderate_minutes or 0) + (x.vigorous_minutes or 0) for x in recovery), "minutes", "violet", "bar"),)),
-        ChartSpec("training-duration", "Training duration", timestamps, (axis("minutes", "Minutes", "min", "integer", 0),), (series("training-duration", "Duration", tuple(sum(item.duration_minutes for item in activity_days[day]) for day in days), "minutes", "blue", "bar"),)),
-        ChartSpec("training-load", "Training load", timestamps, (axis("load", "Load", "load", "integer", 0),), (series("training-load", "Training load", tuple(sum(item.training_load or 0 for item in activity_days[day]) for day in days), "load", "amber", "bar"),)),
-        ChartSpec("hydration", "Hydration", timestamps, (axis("ml", "Hydration", "ml", "integer", 0),), (series("hydration", "Hydration", tuple(x.hydration_ml for x in hydration), "ml", "cyan", "bar"),)),
-        ChartSpec("nutrition", "Nutrition energy", timestamps, (axis("kcal", "Energy", "kcal", "integer", 0),), (series("nutrition", "Nutrition calories", tuple(x.nutrition_calories for x in hydration), "kcal", "amber", "bar"),)),
-        ChartSpec("blood-pressure", "Blood pressure", tuple(item.measured_at.isoformat() for item in pressure.readings), (axis("mmhg", "Pressure", "mmHg", "integer"),), (series("systolic", "Systolic", tuple(float(item.systolic) for item in pressure.readings), "mmhg", "red", "scatter"), series("diastolic", "Diastolic", tuple(float(item.diastolic) for item in pressure.readings), "mmhg", "blue", "scatter")), (ChartReferenceBand("Home monitoring reference", 0, 135, "neutral"),)),
-        ChartSpec("body-kg", "Weight and muscle mass", tuple(item.measured_at.isoformat() for item in body), (axis("kg", "Mass", "kg", "one_decimal"),), (series("weight", "Weight", tuple(item.weight_kg for item in body), "kg", "blue", source="Garmin + RENPHO"), series("muscle-mass", "Muscle mass", tuple(item.muscle_mass_kg for item in body), "kg", "battery", source="RENPHO"))),
-        ChartSpec("body-fat", "Body fat", tuple(item.measured_at.isoformat() for item in body), (axis("percent", "Body fat", "%", "one_decimal", 0, 100, False),), (series("body-fat", "Body fat", tuple(item.body_fat_pct for item in body), "percent", "amber", source="RENPHO"),)),
+        ChartSpec(
+            "stress-battery",
+            "Stress and Body Battery",
+            timestamps,
+            (axis("score", "Score", "score", "integer", 0, 100, False),),
+            (
+                series("stress", "Stress", tuple(stress), "score", "stress"),
+                series("body-battery", "Body Battery", tuple(battery), "score", "battery"),
+            ),
+        ),
+        ChartSpec(
+            "sleep-duration",
+            "Sleep duration and stages",
+            timestamps,
+            (axis("hours", "Hours", "h", "one_decimal", 0),),
+            (
+                series(
+                    "sleep-duration",
+                    "Sleep duration",
+                    tuple(x.sleep_hours for x in recovery),
+                    "hours",
+                    "sleep",
+                    "bar",
+                ),
+                series(
+                    "deep-sleep", "Deep sleep", tuple(x.deep_hours for x in sleep), "hours", "deep"
+                ),
+                series("rem-sleep", "REM sleep", tuple(x.rem_hours for x in sleep), "hours", "rem"),
+            ),
+        ),
+        ChartSpec(
+            "sleep-score",
+            "Sleep score",
+            timestamps,
+            (axis("score", "Score", "score", "integer", 0, 100, False),),
+            (
+                series(
+                    "sleep-score",
+                    "Sleep score",
+                    tuple(x.sleep_score for x in recovery),
+                    "score",
+                    "sleep",
+                ),
+            ),
+        ),
+        ChartSpec(
+            "hrv",
+            "Overnight HRV",
+            timestamps,
+            (axis("hrv", "HRV", "ms", "integer"),),
+            (
+                series(
+                    "overnight-hrv",
+                    "Overnight HRV",
+                    tuple(x.overnight_hrv for x in sleep),
+                    "hrv",
+                    "violet",
+                ),
+            ),
+        ),
+        ChartSpec(
+            "heart-rate",
+            "Heart rate",
+            timestamps,
+            (axis("bpm", "Heart rate", "bpm", "integer"),),
+            (
+                series(
+                    "min-hr", "Daily minimum HR", tuple(x.min_hr for x in health), "bpm", "blue"
+                ),
+                series("max-hr", "Daily maximum HR", tuple(x.max_hr for x in health), "bpm", "red"),
+            ),
+        ),
+        ChartSpec(
+            "spo2",
+            "Sleep SpO₂",
+            timestamps,
+            (axis("percent", "SpO₂", "%", "one_decimal", 80, 100, False),),
+            (series("spo2", "Sleep SpO₂", tuple(x.spo2 for x in sleep), "percent", "cyan"),),
+        ),
+        ChartSpec(
+            "respiration",
+            "Sleep respiration",
+            timestamps,
+            (axis("breaths", "Respiration", "breaths/min", "one_decimal"),),
+            (
+                series(
+                    "respiration",
+                    "Sleep respiration",
+                    tuple(x.respiration for x in sleep),
+                    "breaths",
+                    "violet",
+                ),
+            ),
+        ),
+        ChartSpec(
+            "steps",
+            "Steps",
+            timestamps,
+            (axis("steps", "Steps", "steps", "integer", 0),),
+            (series("steps", "Steps", tuple(x.steps for x in recovery), "steps", "blue", "bar"),),
+        ),
+        ChartSpec(
+            "calories",
+            "Calories",
+            timestamps,
+            (axis("kcal", "Calories", "kcal", "integer", 0),),
+            (
+                series(
+                    "calories",
+                    "Calories",
+                    tuple(x.calories for x in health),
+                    "kcal",
+                    "amber",
+                    "bar",
+                ),
+            ),
+        ),
+        ChartSpec(
+            "intensity-minutes",
+            "Intensity minutes",
+            timestamps,
+            (axis("minutes", "Minutes", "min", "integer", 0),),
+            (
+                series(
+                    "intensity-minutes",
+                    "Intensity minutes",
+                    tuple((x.moderate_minutes or 0) + (x.vigorous_minutes or 0) for x in recovery),
+                    "minutes",
+                    "violet",
+                    "bar",
+                ),
+            ),
+        ),
+        ChartSpec(
+            "training-duration",
+            "Training duration",
+            timestamps,
+            (axis("minutes", "Minutes", "min", "integer", 0),),
+            (
+                series(
+                    "training-duration",
+                    "Duration",
+                    tuple(
+                        sum(item.duration_minutes for item in activity_days[day]) for day in days
+                    ),
+                    "minutes",
+                    "blue",
+                    "bar",
+                ),
+            ),
+        ),
+        ChartSpec(
+            "training-load",
+            "Training load",
+            timestamps,
+            (axis("load", "Load", "load", "integer", 0),),
+            (
+                series(
+                    "training-load",
+                    "Training load",
+                    tuple(
+                        sum(item.training_load or 0 for item in activity_days[day]) for day in days
+                    ),
+                    "load",
+                    "amber",
+                    "bar",
+                ),
+            ),
+        ),
+        ChartSpec(
+            "hydration",
+            "Hydration",
+            timestamps,
+            (axis("ml", "Hydration", "ml", "integer", 0),),
+            (
+                series(
+                    "hydration",
+                    "Hydration",
+                    tuple(x.hydration_ml for x in hydration),
+                    "ml",
+                    "cyan",
+                    "bar",
+                ),
+            ),
+        ),
+        ChartSpec(
+            "nutrition",
+            "Nutrition energy",
+            timestamps,
+            (axis("kcal", "Energy", "kcal", "integer", 0),),
+            (
+                series(
+                    "nutrition",
+                    "Nutrition calories",
+                    tuple(x.nutrition_calories for x in hydration),
+                    "kcal",
+                    "amber",
+                    "bar",
+                ),
+            ),
+        ),
+        ChartSpec(
+            "blood-pressure",
+            "Blood pressure",
+            tuple(item.measured_at.isoformat() for item in pressure.readings),
+            (axis("mmhg", "Pressure", "mmHg", "integer"),),
+            (
+                series(
+                    "systolic",
+                    "Systolic",
+                    tuple(float(item.systolic) for item in pressure.readings),
+                    "mmhg",
+                    "red",
+                    "scatter",
+                ),
+                series(
+                    "diastolic",
+                    "Diastolic",
+                    tuple(float(item.diastolic) for item in pressure.readings),
+                    "mmhg",
+                    "blue",
+                    "scatter",
+                ),
+            ),
+            (ChartReferenceBand("Home monitoring reference", 0, 135, "neutral"),),
+        ),
+        ChartSpec(
+            "body-kg",
+            "Weight and muscle mass",
+            tuple(item.measured_at.isoformat() for item in body),
+            (axis("kg", "Mass", "kg", "one_decimal"),),
+            (
+                series(
+                    "weight",
+                    "Weight",
+                    tuple(item.weight_kg for item in body),
+                    "kg",
+                    "blue",
+                    source="Garmin + RENPHO",
+                ),
+                series(
+                    "muscle-mass",
+                    "Muscle mass",
+                    tuple(item.muscle_mass_kg for item in body),
+                    "kg",
+                    "battery",
+                    source="RENPHO",
+                ),
+            ),
+        ),
+        ChartSpec(
+            "body-fat",
+            "Body fat",
+            tuple(item.measured_at.isoformat() for item in body),
+            (axis("percent", "Body fat", "%", "one_decimal", 0, 100, False),),
+            (
+                series(
+                    "body-fat",
+                    "Body fat",
+                    tuple(item.body_fat_pct for item in body),
+                    "percent",
+                    "amber",
+                    source="RENPHO",
+                ),
+            ),
+        ),
     )
 
 
@@ -1041,7 +1456,9 @@ def group_lifestyle_events(
     )
 
 
-def _behavior_associations(events: tuple[LifestyleEvent, ...], raw: dict[str, Any]) -> list[BehaviorAssociation]:
+def _behavior_associations(
+    events: tuple[LifestyleEvent, ...], raw: dict[str, Any]
+) -> list[BehaviorAssociation]:
     by_behavior: dict[str, set[date]] = {}
     for event in events:
         by_behavior.setdefault(event.name, set()).add(event.day)
@@ -1087,7 +1504,15 @@ def _behavior_associations(events: tuple[LifestyleEvent, ...], raw: dict[str, An
             with_values = [value for day, value in observations.items() if day in event_days]
             without_values = [value for day, value in observations.items() if day not in event_days]
             if len(with_values) >= 3 and len(without_values) >= 3:
-                result.append(BehaviorAssociation(behavior, metric_name, len(with_values), len(without_values), median(with_values) - median(without_values)))
+                result.append(
+                    BehaviorAssociation(
+                        behavior,
+                        metric_name,
+                        len(with_values),
+                        len(without_values),
+                        median(with_values) - median(without_values),
+                    )
+                )
     return result
 
 
@@ -1104,7 +1529,126 @@ def _activity_details(value: Any, *, include_routes: bool) -> list[ActivityDetai
             else ()
         )
         location = _string(summary.get("locationName")) if include_routes else None
-        result.append(ActivityDetail(str(activity_id), location, _number(summary.get("elevationGain")), _number(summary.get("averagePower")), route))
+        exercises = tuple(_exercise_sets(mapping.get("exerciseSets")))
+        splits = tuple(_activity_splits(mapping.get("splits")))
+        component_types = tuple(_activity_component_types(mapping.get("typedSplits")))
+        result.append(
+            ActivityDetail(
+                str(activity_id),
+                location,
+                _number(summary.get("elevationGain")),
+                _number(summary.get("averagePower")),
+                route,
+                _number(summary.get("averageBikeCadence") or summary.get("averageCadence")),
+                exercises,
+                splits,
+                component_types,
+                "exerciseSets" in mapping,
+            )
+        )
+    return result
+
+
+def _records(value: Any, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        for key in keys:
+            nested = value.get(key)
+            if isinstance(nested, list):
+                return [item for item in nested if isinstance(item, dict)]
+    return []
+
+
+def _exercise_sets(value: Any) -> list[ExerciseSet]:
+    result: list[ExerciseSet] = []
+    for index, item in enumerate(
+        _records(value, ("exerciseSets", "sets", "exerciseSetDTOs")), start=1
+    ):
+        exercise = _mapping(item.get("exercise"))
+        name = _string(
+            item.get("exerciseName")
+            or item.get("exerciseKey")
+            or item.get("exerciseCategory")
+            or exercise.get("name")
+            or exercise.get("displayName")
+        )
+        category = _string(
+            item.get("category") or item.get("exerciseCategory") or exercise.get("category")
+        )
+        repetitions = _number(_first_present(item, "repetitionCount", "repetitions", "reps"))
+        duration = _number(_first_present(item, "duration", "durationSeconds", "setDuration"))
+        set_type = _string(_first_present(item, "setType", "type"))
+        weight_grams = _number(item.get("weightGrams"))
+        raw_weight = _number(item.get("weight"))
+        weight_kg = (
+            weight_grams / 1000
+            if weight_grams is not None
+            else raw_weight / 1000
+            if raw_weight is not None and raw_weight > 500
+            else raw_weight
+        )
+        rir = _number(_first_present(item, "repsInReserve", "rir"))
+        rpe = _number(_first_present(item, "rateOfPerceivedExertion", "rpe"))
+        if not any(
+            (
+                name,
+                category,
+                repetitions is not None,
+                weight_kg is not None,
+                duration is not None,
+                set_type,
+                rir is not None,
+                rpe is not None,
+            )
+        ):
+            continue
+        warmup_value = item.get("isWarmup")
+        is_warmup = (
+            warmup_value
+            if isinstance(warmup_value, bool)
+            else set_type.upper() == "WARMUP"
+            if set_type is not None
+            else None
+        )
+        result.append(
+            ExerciseSet(
+                name,
+                category,
+                _integer(_first_present(item, "setNumber", "setIndex")) or index,
+                repetitions,
+                weight_kg,
+                duration,
+                set_type,
+                is_warmup,
+                rir,
+                rpe,
+            )
+        )
+    return result
+
+
+def _first_present(value: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in value and value[key] is not None:
+            return value[key]
+    return None
+
+
+def _activity_splits(value: Any) -> list[ActivitySplit]:
+    result: list[ActivitySplit] = []
+    for item in _records(value, ("lapDTOs", "splits", "splitSummaries")):
+        distance = _number(item.get("distance"))
+        result.append(
+            ActivitySplit(
+                _integer(item.get("splitNumber") or item.get("lapIndex")),
+                _number(item.get("duration") or item.get("elapsedDuration")),
+                distance / 1000 if distance is not None else None,
+                _number(item.get("averageHR") or item.get("averageHeartRate")),
+                _number(item.get("averagePower")),
+                _number(item.get("averageCadence") or item.get("averageBikeCadence")),
+            )
+        )
     return result
 
 
@@ -1131,20 +1675,72 @@ def _extended_domains(value: Any) -> list[ExtendedGarminDomain]:
         if item in ({}, [], None):
             continue
         count = len(item) if isinstance(item, dict | list) else 1
-        result.append(ExtendedGarminDomain(str(name).replace("_", " ").title(), f"{count} record(s) available"))
+        result.append(
+            ExtendedGarminDomain(
+                str(name).replace("_", " ").title(), f"{count} record(s) available"
+            )
+        )
     return result
 
 
-def _nutrition_totals(value: dict[str, Any]) -> tuple[float | None, float | None, float | None, float | None]:
+def _activity_component_types(value: Any) -> list[str]:
+    """Return ordered discipline keys from Garmin typed multisport splits."""
+    result: list[str] = []
+    for item in _records(value, ("typedSplits", "splits", "splitSummaries")):
+        activity_type = _mapping(item.get("activityType"))
+        key = _string(
+            activity_type.get("typeKey") or item.get("typeKey") or item.get("activityTypeKey")
+        )
+        if key and key not in result:
+            result.append(key)
+    return result
+
+
+def _nutrition_totals(
+    value: dict[str, Any],
+) -> tuple[
+    tuple[float | None, float | None, float | None, float | None],
+    tuple[float | None, float | None, float | None, float | None],
+]:
+    """Keep consumed nutrients separate from daily targets.
+
+    Garmin returns daily goals even when no food was logged. Falling back from
+    an empty meal log to those goals makes a target look like actual intake.
+    """
     goals = _mapping(value.get("dailyNutritionGoals"))
     details = value.get("mealDetails", [])
     records = details if isinstance(details, list) else []
+
     def total(*keys: str) -> float | None:
-        numbers = [_number(item.get(key)) for item in records if isinstance(item, dict) for key in keys if item.get(key) is not None]
-        if numbers:
-            return sum(x for x in numbers if x is not None)
-        return next((_number(goals.get(key)) for key in keys if _number(goals.get(key)) is not None), None)
-    return total("calories", "caloriesConsumed"), total("protein", "proteinInGrams"), total("carbohydrates", "carbsInGrams"), total("fat", "fatInGrams")
+        numbers = [
+            _number(item.get(key))
+            for item in records
+            if isinstance(item, dict)
+            for key in keys
+            if item.get(key) is not None
+        ]
+        return sum(x for x in numbers if x is not None) if numbers else None
+
+    def goal(*keys: str) -> float | None:
+        return next(
+            (_number(goals.get(key)) for key in keys if _number(goals.get(key)) is not None),
+            None,
+        )
+
+    return (
+        (
+            total("calories", "caloriesConsumed"),
+            total("protein", "proteinInGrams"),
+            total("carbohydrates", "carbsInGrams"),
+            total("fat", "fatInGrams"),
+        ),
+        (
+            goal("calories", "calorieGoal"),
+            goal("protein", "proteinInGrams"),
+            goal("carbohydrates", "carbsInGrams"),
+            goal("fat", "fatInGrams"),
+        ),
+    )
 
 
 def _mapping(value: Any) -> dict[str, Any]:

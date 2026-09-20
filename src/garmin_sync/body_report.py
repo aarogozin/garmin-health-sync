@@ -42,6 +42,7 @@ class ReportProvider:
         self.vendor = vendor
 
     def resolve(self, report: RenphoReportData) -> ReportDocument:
+        """Prefer a validated vendor PDF and fall back to local rendering on any failure."""
         if self.vendor is not None and report.report_id:
             try:
                 candidate = self.vendor.fetch(report.report_id)
@@ -54,6 +55,7 @@ class ReportProvider:
 
 
 def body_composition_pdf(report: RenphoReportData) -> bytes:
+    """Embed the rendered measurement sheet in an A4 PDF without creating disk artifacts."""
     page = render_report_image(report)
     png = BytesIO()
     page.save(png, "PNG", optimize=True)

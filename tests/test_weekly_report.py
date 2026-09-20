@@ -1,5 +1,7 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from io import BytesIO
 
+import pytest
 from pypdf import PdfReader
 
 from garmin_sync.models import BERLIN, BodyComposition
@@ -99,6 +101,20 @@ def test_weekly_mapping_deduplicates_body_and_normalizes_pressure_time() -> None
     assert report.body[0].body_fat_pct == 18
 
 
+def test_weekly_mapping_extracts_the_garmin_vo2_max_estimate() -> None:
+    raw = _raw()
+    raw["max_metrics"] = {"generic": {"vo2MaxValue": 48.7, "other": 120}}
+    report = build_report(
+        start_date=date(2026, 8, 9),
+        end_date=date(2026, 8, 15),
+        garmin=raw,
+        renpho=[],
+        available=["max_metrics"],
+        unavailable=[],
+    )
+    assert report.vo2_max == 48.7
+
+
 def test_weekly_html_escapes_values_and_pdf_is_vector_a4() -> None:
     report = build_report(
         start_date=date(2026, 8, 9),
@@ -137,6 +153,20 @@ def test_sparse_data_produces_cautious_insight() -> None:
     )
     assert report.availability.unavailable == ("Garmin session", "renpho")
     assert any("not enough data" in item.text for item in report.insights)
+
+
+@pytest.mark.parametrize("days", [1, 30])
+def test_report_headings_match_the_actual_period(days: int) -> None:
+    end = date(2026, 8, 15)
+    report = build_report(
+        start_date=end - timedelta(days=days - 1), end_date=end,
+        garmin={}, renpho=[], available=[], unavailable=[],
+    )
+    title = f"{days}-day health report"
+    assert title in render_weekly_html(report, "csrf", "report")
+    pdf = PdfReader(BytesIO(render_weekly_report_pdf(report)))
+    assert pdf.metadata is not None and pdf.metadata.title == title
+    assert title in (pdf.pages[0].extract_text() or "")
 
 
 def test_activity_link_rejects_non_numeric_api_identifier() -> None:

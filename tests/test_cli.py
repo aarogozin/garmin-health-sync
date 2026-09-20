@@ -21,6 +21,7 @@ from garmin_sync.cli import (
 from garmin_sync.garmin import GarminSyncError, UploadUncertain
 from garmin_sync.models import BERLIN, BloodPressure, BodyComposition, ValidationError
 from garmin_sync.renpho import RenphoError, RenphoMeasurement
+from garmin_sync.secrets import SecretStoreError
 from garmin_sync.service import OperationResult, RenphoPreview, ResultStatus
 from garmin_sync.state import SyncState
 
@@ -225,17 +226,19 @@ class AddClient:
 
 def test_add_command_uploads_pressure_and_can_cancel_body(capsys) -> None:
     client = AddClient()
-    assert add_command(
-        client, answers(["2", "2026-08-13 08:30", "120", "80", "60", "morning", "yes"])
-    ) == 0  # type: ignore[arg-type]
+    assert (
+        add_command(client, answers(["2", "2026-08-13 08:30", "120", "80", "60", "morning", "yes"]))
+        == 0
+    )  # type: ignore[arg-type]
     assert isinstance(client.uploaded[0], BloodPressure)
 
-    assert add_command(
-        client,
-        answers(
-            ["1", "2026-08-13 08:30", "80", "", "", "", "", "", "", "", "", "no"]
-        ),
-    ) == 0  # type: ignore[arg-type]
+    assert (
+        add_command(
+            client,
+            answers(["1", "2026-08-13 08:30", "80", "", "", "", "", "", "", "", "", "no"]),
+        )
+        == 0
+    )  # type: ignore[arg-type]
     assert len(client.uploaded) == 1
     output = capsys.readouterr().out
     assert "Uploaded and verified" in output
@@ -336,3 +339,41 @@ def test_main_reports_known_errors_without_traceback(monkeypatch, capsys) -> Non
         lambda self: (_ for _ in ()).throw(UploadUncertain("check")),
     )
     assert main(["status"]) == 3
+
+
+def test_main_handles_secret_initialization_failure(monkeypatch, capsys) -> None:
+    def unavailable():
+        raise SecretStoreError("Could not read a valid container secret key")
+
+    monkeypatch.setattr("garmin_sync.cli.configured_stores", unavailable)
+    assert main(["status"]) == 2
+    output = capsys.readouterr().err
+    assert "secret key" in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.parametrize(
+    "status", [ResultStatus.AUTH_REQUIRED, ResultStatus.RATE_LIMITED, ResultStatus.CONFLICT]
+)
+def test_daily_sync_reports_failed_upload_but_still_refreshes_archive(
+    monkeypatch, tmp_path, status
+) -> None:
+    calls = []
+
+    class DailyService:
+        def __init__(self, *args):
+            pass
+
+        def preview_renpho(self, mode):
+            return object()
+
+        def sync_renpho(self, preview):
+            return [OperationResult(status, "safe failure")]
+
+        def archive_refresh(self):
+            calls.append("archive")
+            return OperationResult(ResultStatus.SUCCESS, "done")
+
+    monkeypatch.setattr("garmin_sync.cli.HealthSyncService", DailyService)
+    assert daily_sync(object(), object(), SyncState(tmp_path / "state.json")) == 2
+    assert calls == ["archive"]

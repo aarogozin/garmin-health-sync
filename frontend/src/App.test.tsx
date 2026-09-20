@@ -6,7 +6,7 @@ import { App } from './App'
 
 const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
   const path = String(input)
-  const bootstrap = { version: '1.0.0', csrf_token: 'test', timezone: 'Europe/Berlin', busy: false, sources: { garmin: { connected: true, label: 'Garmin', detail: 'Connected' }, renpho: { connected: false, label: 'RENPHO', detail: 'Not connected' } }, capabilities: {}, latest_weekly_report_id: null }
+  const bootstrap = { version: '1.1.0', csrf_token: 'test', timezone: 'Europe/Berlin', busy: false, sources: { garmin: { connected: true, label: 'Garmin', detail: 'Connected' }, renpho: { connected: false, label: 'RENPHO', detail: 'Not connected' } }, capabilities: {}, latest_weekly_report_id: null }
   const data = path.includes('/dashboard') && (init?.method ?? 'GET') === 'GET' ? { latest_body: null, report: null, events: [] } : path.includes('/dashboard/refresh') ? { job_id: 'dashboard-job', kind: 'dashboard-7-days' } : bootstrap
   return { ok: true, json: async () => ({ status: 'success', data }) }
 })

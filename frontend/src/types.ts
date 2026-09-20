@@ -7,7 +7,19 @@ export type Bootstrap = {
   sources: { garmin: SourceStatus; renpho: SourceStatus }
   capabilities: Record<string, boolean>
   latest_weekly_report_id: string | null
+  latest_health_context_ids: Partial<Record<'current' | '7d' | '30d', string>>
   profile: null | { display_name: string; initials: string; avatar_available: boolean }
+}
+export type HealthContextMetadata = {
+  id: string
+  status: string
+  period: 'current' | '7d' | '30d'
+  start_date: string
+  end_date: string
+  generated_at: string
+  archived: boolean
+  summary: { activities: number; training_minutes: number; pressure_days: number; body_measurements: number }
+  availability: { status: string; available: string[]; unavailable: string[]; truncated: string[] }
 }
 export type Envelope<T> = { status: string; data: T; error?: { code: string; message: string } }
 export type ChartAxis = { id: string; label: string; unit: string; formatter: string; minimum: number | null; maximum: number | null; scale: boolean }
@@ -21,6 +33,7 @@ export type WeeklyReport = {
   generated_at: string
   availability: { available: string[]; unavailable: string[] }
   summary: { training_minutes: number; activities: number; pressure_days: number; weight_points: number }
+  vo2_max: number | null
   activities: Array<Record<string, any>>
   insights: Array<{ level: string; text: string; category: string; confidence: string; source_title?: string; source_url?: string }>
   charts: { charts: ChartSpec[]; routes: Array<Record<string, any>>; lifestyle: Array<Record<string, any>>; map_tiles_enabled: boolean }
@@ -31,6 +44,13 @@ export type Dashboard = {
   latest_body: null | { measured_at: string; weight_kg: number; report_source: string; summary: Array<{ label: string; value: string }> }
   report: WeeklyReport | null
   events: string[]
+}
+export type ArchiveStatus = {
+  path: string
+  ready: boolean
+  daily_documents: number
+  weekly_documents: number
+  last_updated: string | null
 }
 export type Job = {
   id: string

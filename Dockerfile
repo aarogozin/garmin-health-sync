@@ -1,4 +1,14 @@
 # syntax=docker/dockerfile:1.7
+FROM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS host-helper
+
+ARG TARGETARCH
+WORKDIR /source/host_helper
+COPY host_helper/go.mod host_helper/main.go ./
+RUN CGO_ENABLED=0 GOOS=darwin GOARCH=${TARGETARCH} go build -trimpath -ldflags='-s -w' -o /out/health-sync-host-helper .
+
+FROM scratch AS host-helper-export
+COPY --from=host-helper /out/health-sync-host-helper /health-sync-host-helper
+
 FROM node:24-bookworm-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df AS frontend
 
 WORKDIR /source/frontend
@@ -20,6 +30,7 @@ FROM python:3.12-slim-bookworm@sha256:0f5b26b9518d002b6173fd61daad821fa340635ebf
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     GARMIN_SYNC_DATA_DIR=/data \
+    GARMIN_SYNC_ARCHIVE_DIR=/archive \
     GARMIN_SYNC_SECRET_KEY_FILE=/run/secrets/garmin_sync_key \
     GARMIN_SYNC_BIND=0.0.0.0 \
     GARMIN_SYNC_PORT=8080 \

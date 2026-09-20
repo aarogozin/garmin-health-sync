@@ -6,6 +6,16 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - garmin-sync-data:/data
+      - type: bind
+        source: ${GARMIN_SYNC_ARCHIVE_HOST_DIR:?Run ./health-sync start to configure the private Markdown workspace.}
+        target: /archive
+        bind:
+          create_host_path: false
+    environment:
+      GARMIN_SYNC_ARCHIVE_DIR: /archive
+      GARMIN_SYNC_ARCHIVE_DISPLAY_PATH: ${GARMIN_SYNC_ARCHIVE_DISPLAY_PATH:-/archive}
+      GARMIN_SYNC_HOST_BRIDGE_URL: ${GARMIN_SYNC_HOST_BRIDGE_URL:-}
+      GARMIN_SYNC_HOST_BRIDGE_TOKEN: ${GARMIN_SYNC_HOST_BRIDGE_TOKEN:-}
     secrets:
       - garmin_sync_key
     restart: unless-stopped
@@ -24,4 +34,4 @@ volumes:
 
 secrets:
   garmin_sync_key:
-    file: ./docker/secret.key
+    file: ${GARMIN_SYNC_SECRET_KEY_PATH:?Run ./health-sync start to create the private Docker key.}

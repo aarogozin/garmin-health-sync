@@ -3,9 +3,25 @@
 All notable changes to Garmin Health Sync are documented here. The project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [1.1.0] - 2026-09-20
+
+- Add schema-versioned Current, 7-day and 30-day AI health context exports as
+  synchronized JSON and Markdown files, available from Reports, CLI and Docker.
+- Include privacy-filtered training/recovery history, body-composition dynamics,
+  pressure readings, Garmin strength sets/splits and conservative inferred muscle groups.
+- Show Garmin VO₂ max on the Overview dashboard when the connected device exposes it.
+- Reconcile the latest RENPHO measurement during GUI startup using existing duplicate,
+  conflict and exact verification protections.
 
 ### Fixed
+
+- Preserve existing Markdown health notes when a partial collection loses data.
+- Serialize encrypted credential updates across GUI and scheduled processes.
+- Finish expired MFA jobs, isolate account caches, preserve weekly-report links
+  during dashboard refresh, and honor domain period controls.
+- Preserve the running host-helper capability during status/log/schedule commands;
+  rebuild helpers after source changes and preserve custom schedule storage paths.
+- Return safe CLI errors for invalid credential setup and failed upload outcomes.
 
 - Fixed chart SVGs being constrained to the global 20×20 icon size, which
   made populated ECharts panels appear empty.
@@ -23,8 +39,12 @@ All notable changes to Garmin Health Sync are documented here. The project follo
 
 ### Changed
 
-- The daily LaunchAgent now performs only the verified RENPHO body-composition
-  upload to Garmin.
+- Docker is the primary runtime through `./health-sync`; Markdown notes mount
+  separately from encrypted credentials and synchronization state.
+- The daily LaunchAgent performs the verified RENPHO body-composition upload to
+  Garmin, then independently refreshes the enabled Markdown archive.
+- Rewrote setup, migration, storage, contribution and troubleshooting documentation
+  in English and documented service/adapter function contracts.
 
 ## [1.0.0] - 2026-08-27
 
@@ -91,3 +111,4 @@ All notable changes to Garmin Health Sync are documented here. The project follo
 
 [0.11.0]: https://github.com/aarogozin/garmin-health-sync/releases/tag/v0.11.0
 [1.0.0]: https://github.com/aarogozin/garmin-health-sync/releases/tag/v1.0.0
+[1.1.0]: https://github.com/aarogozin/garmin-health-sync/releases/tag/v1.1.0

@@ -28,7 +28,7 @@ from flask import (
 from werkzeug.serving import BaseWSGIServer
 
 from .garmin import GarminClient
-from .models import BloodPressure, ValidationError, local_now, parse_local_datetime
+from .models import BERLIN, BloodPressure, ValidationError, local_now, parse_local_datetime
 from .renpho import RenphoCloud, RenphoMeasurement
 from .secrets import configured_stores
 from .service import (
@@ -38,6 +38,7 @@ from .service import (
     OperationResult,
     RenphoHistory,
     RenphoPreview,
+    ResultStatus,
     WeeklyReportResult,
 )
 from .state import SyncState
@@ -139,11 +140,7 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
             same_origin_null = (
                 origin == "null" and request.headers.get("Sec-Fetch-Site") == "same-origin"
             )
-            if (
-                origin
-                and not same_origin_null
-                and _origin_hostname(origin) not in allowed_hosts
-            ):
+            if origin and not same_origin_null and _origin_hostname(origin) not in allowed_hosts:
                 abort(403)
             supplied_token = request.headers.get("X-CSRF-Token", "")
             if not supplied_token:
@@ -226,7 +223,9 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
         job_id = jobs.submit(operation)
         if job_id is None:
             return Response(
-                page("<section><h2>An operation is already running</h2><a href='/'>Back</a></section>"),
+                page(
+                    "<section><h2>An operation is already running</h2><a href='/'>Back</a></section>"
+                ),
                 status=409,
             )
         return redirect(url_for("job_status", job_id=job_id))
@@ -279,12 +278,18 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
     def weekly_report_generate() -> Any:
         map_tiles_enabled = request.form.get("map_tiles") == "yes"
         include_routes = request.form.get("include_routes") == "yes" or map_tiles_enabled
-        return start(
-            lambda: sync_service.build_weekly_report(
+
+        def build_and_archive() -> WeeklyReportResult:
+            result = sync_service.build_weekly_report(
                 include_routes=include_routes,
                 map_tiles_enabled=map_tiles_enabled,
             )
-        )
+            archive_operation = getattr(sync_service, "archive_report", None)
+            if callable(archive_operation):
+                archive_operation(result)
+            return result
+
+        return start(build_and_archive)
 
     @app.get("/weekly-report/<report_id>")
     def weekly_report_view(report_id: str) -> str:
@@ -321,7 +326,8 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
         if result is None:
             abort(404)
         report = result.report
-        filename = f"weekly-health-report-{report.start_date}-to-{report.end_date}.pdf"
+        generated = report.generated_at.astimezone(BERLIN).strftime("%Y-%m-%d_%H-%M-%S")
+        filename = f"weekly-health-report-{generated}.pdf"
         response = Response(result.pdf, mimetype="application/pdf")
         response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
         return response
@@ -426,7 +432,9 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
         if isinstance(result, LatestRenphoReport):
             latest_renpho[:] = [result]
             latest_error.clear()
-            events.append(f"RENPHO: loaded measurement for {result.measurement.body.measured_at.date()}")
+            events.append(
+                f"RENPHO: loaded measurement for {result.measurement.body.measured_at.date()}"
+            )
             return page(
                 f"<section><h2>Latest RENPHO measurement</h2>{_renpho_card(result, token)}<a href='/'>Home</a></section>"
             )
@@ -480,14 +488,11 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
             if isinstance(item, OperationResult):
                 events.append(f"{item.status.value}: {item.message}")
         content = "".join(
-            f"<li class='{item.status.value}'>"
-            f"{_escape(item.message)}</li>"
+            f"<li class='{item.status.value}'>{_escape(item.message)}</li>"
             for item in results
             if isinstance(item, OperationResult)
         )
-        return page(
-            f"<section><h2>Result</h2><ul>{content}</ul><a href='/'>Home</a></section>"
-        )
+        return page(f"<section><h2>Result</h2><ul>{content}</ul><a href='/'>Home</a></section>")
 
     def auto_loaded(future: Future[Any]) -> None:
         try:
@@ -509,6 +514,10 @@ def create_app(service: HealthSyncService | None = None, csrf_token: str | None 
             except Exception:
                 garmin_profile.clear()
         events.append(f"Garmin startup check: {status_result.status.value}")
+        if status_result.status == ResultStatus.SUCCESS:
+            for sync_result in sync_service.sync_latest_renpho_if_needed():
+                # Do not add timestamps, body values, or provider responses to the journal.
+                events.append(f"RENPHO startup sync: {sync_result.status.value}")
         return sync_service.latest_report()
 
     auto_job = jobs.submit(startup_checks)
@@ -701,6 +710,7 @@ BODY_CALLOUTS = {
     "Right calf": ("left", 510, 179, 510),
     "Waist-to-hip ratio": ("right", 326, 238, 330),
 }
+
 
 def _body_measurement_visual(item: Any) -> str:
     callouts: list[str] = []

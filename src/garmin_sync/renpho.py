@@ -96,7 +96,12 @@ class RenphoCloud:
         self._factory = factory
         self._api: RenphoAPI | None = None
 
+    def clear_session(self) -> None:
+        """Forget the live account so the next read uses the currently stored credentials."""
+        self._api = None
+
     def authenticate(self) -> RenphoAPI:
+        """Reuse a live session or authenticate stored credentials with bounded network calls."""
         if self._api is not None:
             return self._api
         credentials = self._credentials.load()
@@ -126,6 +131,7 @@ class RenphoCloud:
         return api
 
     def fetch(self) -> tuple[list[RenphoMeasurement], int]:
+        """Return newest-first usable measurements and count records rejected by normalization."""
         raw_items = self._fetch_measurements()
 
         result: list[RenphoMeasurement] = []
@@ -222,6 +228,7 @@ class RenphoCloud:
 
 
 def normalize_measurement(raw: dict[str, Any]) -> RenphoMeasurement:
+    """Convert vendor percentages into Garmin mass fields and assign a stable source ID."""
     weight = _required_float(raw, "weight")
     measured_at = _timestamp(raw)
     muscle_percent = _optional_float(raw, "muscle")
@@ -271,6 +278,7 @@ GIRTH_FIELDS = (
 
 
 def normalize_girth(raw: dict[str, Any]) -> RenphoGirthMeasurement:
+    """Keep positive circumference values with their source units and optional waist/hip ratio."""
     measured_at = _timestamp(raw)
     values: list[GirthValue] = []
     for prefix, label in GIRTH_FIELDS:

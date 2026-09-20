@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 import secrets
-import sys
 import threading
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from time import monotonic
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
@@ -12,10 +13,12 @@ import requests
 from flask import Blueprint, Response, jsonify, request
 from pydantic import ValidationError as PydanticValidationError
 
-from . import __version__, schedule
+from . import __version__
 from .api_models import (
+    ArchiveBackfillRequest,
     DashboardRefreshRequest,
     GarminLoginRequest,
+    HealthContextRequest,
     MfaRequest,
     PressureRequest,
     RenphoLoginRequest,
@@ -23,11 +26,14 @@ from .api_models import (
     SyncPreviewRequest,
     WeeklyReportRequest,
 )
+from .archive import ArchiveStatus, render_weekly_markdown
 from .garmin import GarminProfile
 from .models import BERLIN, BloodPressure, ValidationError, parse_local_datetime
 from .renpho import RenphoCloud, SuppliedCredentials
+from .scheduler import Scheduler, SchedulerError
 from .secrets import RenphoStore, TokenStore
 from .service import (
+    HealthContextResult,
     LatestRenphoReport,
     OperationResult,
     RenphoHistory,
@@ -82,13 +88,20 @@ class WebApiState:
     garmin_profile: list[GarminProfile] = field(default_factory=list)
     avatar: AvatarCache = field(default_factory=AvatarCache)
     dashboard_reports: dict[int, tuple[str, WeeklyReportResult]] = field(default_factory=dict)
+    health_contexts: dict[str, HealthContextResult] = field(default_factory=dict)
+    latest_health_context_ids: dict[str, str] = field(default_factory=dict)
     token_store: TokenStore | None = None
     renpho_store: RenphoStore | None = None
     completed_jobs: dict[str, dict[str, Any]] = field(default_factory=dict)
     mfa: dict[str, MfaBroker] = field(default_factory=dict)
+    job_kinds: dict[str, str] = field(default_factory=dict)
+    renpho_authenticated: bool = False
+    account_generation: int = 0
+    job_generations: dict[str, int] = field(default_factory=dict)
 
 
 def register_api(app: Any, state: WebApiState) -> None:
+    """Expose the local UI contract over the shared service and in-memory job state."""
     api = Blueprint("api_v1", __name__, url_prefix="/api/v1")
 
     def envelope(
@@ -109,7 +122,16 @@ def register_api(app: Any, state: WebApiState) -> None:
         return model.model_validate(request.get_json(silent=False))
 
     def start(operation: Any, *, kind: str) -> Response:
-        job_id = state.jobs.submit(operation)
+        generation = state.account_generation
+
+        def run_for_account() -> Any:
+            if generation != state.account_generation and kind not in _LOGIN_KINDS:
+                raise RuntimeError("Account changed; start this operation again")
+            return operation()
+
+        job_id = state.jobs.submit(run_for_account)
+        state.job_kinds[job_id] = kind
+        state.job_generations[job_id] = generation
         state.events.append(f"{kind}: started")
         return envelope("queued", {"job_id": job_id, "kind": kind}, code=202)
 
@@ -131,6 +153,7 @@ def register_api(app: Any, state: WebApiState) -> None:
 
     def _status_with_profile() -> OperationResult:
         result = cast(OperationResult, state.service.status())
+        state.garmin_status[:] = [result]
         if result.status == ResultStatus.SUCCESS:
             try:
                 profile = state.service.garmin.profile()
@@ -139,7 +162,22 @@ def register_api(app: Any, state: WebApiState) -> None:
             else:
                 state.garmin_profile[:] = [profile]
                 state.avatar = AvatarCache()
+        else:
+            state.garmin_profile.clear()
+            state.avatar = AvatarCache()
         return result
+
+    def clear_snapshots() -> None:
+        """Invalidate account-dependent reports and write previews after a source changes."""
+        state.account_generation += 1
+        state.latest_renpho.clear()
+        state.latest_error.clear()
+        state.weekly_reports.clear()
+        state.latest_weekly_id.clear()
+        state.dashboard_reports.clear()
+        state.health_contexts.clear()
+        state.latest_health_context_ids.clear()
+        state.previews.clear()
 
     @api.errorhandler(PydanticValidationError)
     def invalid_payload(exc: PydanticValidationError) -> Response:
@@ -161,11 +199,13 @@ def register_api(app: Any, state: WebApiState) -> None:
                 "sources": {
                     "garmin": _source_status(garmin),
                     "renpho": {
-                        "connected": bool(state.latest_renpho),
+                        "connected": state.renpho_authenticated or bool(state.latest_renpho),
                         "label": "RENPHO",
                         "detail": (
                             "Latest measurement loaded"
                             if state.latest_renpho
+                            else "RENPHO connected; refresh the latest measurement"
+                            if state.renpho_authenticated
                             else state.latest_error[-1]
                             if state.latest_error
                             else "Not connected"
@@ -184,10 +224,13 @@ def register_api(app: Any, state: WebApiState) -> None:
                     "renpho_auth": state.renpho_store is not None,
                     "weekly_report": True,
                     "body_measurements": True,
+                    "local_archive": True,
+                    "ai_health_context": True,
                 },
                 "latest_weekly_report_id": (
                     state.latest_weekly_id[-1] if state.latest_weekly_id else None
                 ),
+                "latest_health_context_ids": dict(state.latest_health_context_ids),
             },
         )
 
@@ -239,58 +282,79 @@ def register_api(app: Any, state: WebApiState) -> None:
 
     @api.get("/schedule")
     def schedule_status() -> Response:
-        supported = sys.platform == "darwin"
-        installed = schedule.plist_path().exists() if supported else False
+        status = Scheduler().status()
         return envelope(
             "success",
             {
-                "supported": supported,
-                "installed": installed,
-                "loaded": schedule.is_loaded() if installed else False,
-                "legacy": schedule.is_legacy() if installed else False,
+                "supported": status.supported,
+                "installed": status.installed,
+                "loaded": status.loaded,
+                "legacy": status.legacy,
+                "detail": status.detail,
             },
         )
 
+    @api.get("/archive")
+    def archive_status() -> Response:
+        return envelope("success", _archive_payload(state.service.archive_status()))
+
+    @api.post("/archive/setup")
+    def archive_setup() -> Response:
+        return start(state.service.archive_initialize, kind="archive-setup")
+
+    @api.post("/archive/refresh")
+    def archive_refresh() -> Response:
+        return start(state.service.archive_refresh, kind="archive-refresh")
+
+    @api.post("/archive/backfill")
+    def archive_backfill() -> Response:
+        payload = parse(ArchiveBackfillRequest)
+        return start(lambda: state.service.archive_backfill(payload.days), kind="archive-backfill")
+
+    @api.post("/archive/open")
+    def archive_open() -> Response:
+        status = state.service.archive_status()
+        if not status.exists:
+            return envelope("not_found", code=404, error="Set up the local archive first")
+        try:
+            Scheduler().open_archive(str(status.root))
+        except SchedulerError as exc:
+            return envelope("unavailable", code=501, error=str(exc))
+        return envelope("success", {"opened": True})
+
     @api.post("/schedule/install")
     def schedule_install() -> Response:
-        if sys.platform != "darwin":
-            return envelope(
-                "unavailable",
-                code=501,
-                error="Automatic scheduling is available only on macOS",
-            )
         payload = parse(ScheduleRequest)
 
         def install_daily() -> OperationResult:
-            schedule.install(hour=payload.hour, minute=payload.minute)
-            return OperationResult(ResultStatus.SUCCESS, "Daily two-way sync scheduled")
+            try:
+                Scheduler().install(hour=payload.hour, minute=payload.minute)
+                return OperationResult(ResultStatus.SUCCESS, "Daily Docker sync scheduled")
+            except SchedulerError as exc:
+                return OperationResult(ResultStatus.ERROR, str(exc))
 
         return start(install_daily, kind="schedule-install")
 
     @api.post("/schedule/run")
     def schedule_run() -> Response:
-        if sys.platform != "darwin" or not schedule.plist_path().exists():
-            return envelope("unavailable", code=409, error="No macOS schedule is installed")
-
         def run_schedule() -> OperationResult:
-            schedule.run_now()
-            return OperationResult(ResultStatus.SUCCESS, "Scheduled sync started")
+            try:
+                Scheduler().run_now()
+                return OperationResult(ResultStatus.SUCCESS, "Scheduled sync started")
+            except SchedulerError as exc:
+                return OperationResult(ResultStatus.ERROR, str(exc))
 
         return start(run_schedule, kind="schedule-run")
 
     @api.post("/schedule/uninstall")
     def schedule_uninstall() -> Response:
-        if sys.platform != "darwin":
-            return envelope(
-                "unavailable",
-                code=501,
-                error="Automatic scheduling is available only on macOS",
-            )
-
         def remove_schedule() -> OperationResult:
-            removed = schedule.uninstall()
-            message = "Daily schedule removed" if removed else "No schedule was installed"
-            return OperationResult(ResultStatus.SUCCESS, message)
+            try:
+                removed = Scheduler().uninstall()
+                message = "Daily schedule removed" if removed else "No schedule was installed"
+                return OperationResult(ResultStatus.SUCCESS, message)
+            except SchedulerError as exc:
+                return OperationResult(ResultStatus.ERROR, str(exc))
 
         return start(remove_schedule, kind="schedule-uninstall")
 
@@ -304,13 +368,18 @@ def register_api(app: Any, state: WebApiState) -> None:
         def login() -> OperationResult:
             try:
                 name = state.service.garmin.login(payload.email, payload.password, broker.prompt)
-                return OperationResult(ResultStatus.SUCCESS, f"Connected: {name}")
+                clear_snapshots()
+                state.garmin_profile.clear()
+                state.avatar = AvatarCache()
+                result = OperationResult(ResultStatus.SUCCESS, f"Connected: {name}")
+                state.garmin_status[:] = [result]
+                return result
             except Exception as exc:
                 return OperationResult(ResultStatus.ERROR, _safe_error(exc))
 
         response = start(login, kind="garmin-login")
         body = response.get_json(silent=True) or {}
-        job_id = ((body.get("data") or {}).get("job_id"))
+        job_id = (body.get("data") or {}).get("job_id")
         if isinstance(job_id, str):
             state.mfa[job_id] = broker
         return response
@@ -329,7 +398,13 @@ def register_api(app: Any, state: WebApiState) -> None:
     def garmin_logout() -> Response:
         if state.token_store is None:
             return envelope("unavailable", error="GUI authentication is unavailable")
+        if state.jobs.busy:
+            return envelope("conflict", code=409, error="Wait for active operations to finish")
         removed = state.token_store.delete()
+        state.service.garmin.clear_session()
+        clear_snapshots()
+        state.garmin_profile.clear()
+        state.avatar = AvatarCache()
         state.garmin_status[:] = [
             OperationResult(ResultStatus.AUTH_REQUIRED, "No saved Garmin session")
         ]
@@ -346,6 +421,9 @@ def register_api(app: Any, state: WebApiState) -> None:
             try:
                 RenphoCloud(SuppliedCredentials(payload.email, payload.password)).authenticate()
                 renpho_store.save(payload.email, payload.password)
+                state.service.renpho.clear_session()
+                clear_snapshots()
+                state.renpho_authenticated = True
                 return OperationResult(ResultStatus.SUCCESS, "RENPHO connected")
             except Exception as exc:
                 return OperationResult(ResultStatus.ERROR, _safe_error(exc))
@@ -356,8 +434,12 @@ def register_api(app: Any, state: WebApiState) -> None:
     def renpho_logout() -> Response:
         if state.renpho_store is None:
             return envelope("unavailable", error="RENPHO setup is unavailable")
+        if state.jobs.busy:
+            return envelope("conflict", code=409, error="Wait for active operations to finish")
         removed = state.renpho_store.delete()
-        state.latest_renpho.clear()
+        state.service.renpho.clear_session()
+        clear_snapshots()
+        state.renpho_authenticated = False
         return envelope("success", {"removed": removed})
 
     @api.post("/pressure/preview")
@@ -402,11 +484,22 @@ def register_api(app: Any, state: WebApiState) -> None:
     def weekly_generate() -> Response:
         payload = parse(WeeklyReportRequest)
         include_routes = payload.include_routes or payload.map_tiles_enabled
+
+        def build_and_archive() -> WeeklyReportResult:
+            result = cast(
+                WeeklyReportResult,
+                state.service.build_weekly_report(
+                    include_routes=include_routes,
+                    map_tiles_enabled=payload.map_tiles_enabled,
+                ),
+            )
+            archive_operation = getattr(state.service, "archive_report", None)
+            if callable(archive_operation):
+                archive_operation(result)
+            return result
+
         return start(
-            lambda: state.service.build_weekly_report(
-                include_routes=include_routes,
-                map_tiles_enabled=payload.map_tiles_enabled,
-            ),
+            build_and_archive,
             kind="weekly-report",
         )
 
@@ -423,8 +516,60 @@ def register_api(app: Any, state: WebApiState) -> None:
         if result is None:
             return envelope("not_found", code=404, error="Report is unavailable")
         report = result.report
-        filename = f"weekly-health-report-{report.start_date}-to-{report.end_date}.pdf"
+        filename = f"weekly-health-report-{_download_stamp(report.generated_at)}.pdf"
         response = Response(result.pdf, mimetype="application/pdf")
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
+
+    @api.post("/reports/weekly/<report_id>/markdown")
+    def weekly_markdown_download(report_id: str) -> Response:
+        result = state.weekly_reports.get(report_id)
+        if result is None:
+            return envelope("not_found", code=404, error="Report is unavailable")
+        report = result.report
+        filename = f"weekly-health-report-{_download_stamp(report.generated_at)}.md"
+        response = Response(render_weekly_markdown(report), mimetype="text/markdown")
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
+
+    @api.post("/ai-context/generate")
+    def ai_context_generate() -> Response:
+        payload = cast(HealthContextRequest, parse(HealthContextRequest))
+        return start(
+            lambda: state.service.build_health_context(payload.period),
+            kind="ai-health-context",
+        )
+
+    @api.get("/ai-context/<context_id>")
+    def ai_context_metadata(context_id: str) -> Response:
+        result = state.health_contexts.get(context_id)
+        if result is None:
+            return envelope("not_found", code=404, error="AI health context is unavailable")
+        return envelope("success", _health_context_payload(context_id, result))
+
+    @api.post("/ai-context/<context_id>/json")
+    def ai_context_json(context_id: str) -> Response:
+        result = state.health_contexts.get(context_id)
+        if result is None:
+            return envelope("not_found", code=404, error="AI health context is unavailable")
+        filename = (
+            f"health-context-{result.context.period.kind}-"
+            f"{_download_stamp(result.context.generated_at)}.json"
+        )
+        response = Response(result.json_content, mimetype="application/json")
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
+
+    @api.post("/ai-context/<context_id>/markdown")
+    def ai_context_markdown(context_id: str) -> Response:
+        result = state.health_contexts.get(context_id)
+        if result is None:
+            return envelope("not_found", code=404, error="AI health context is unavailable")
+        filename = (
+            f"health-context-{result.context.period.kind}-"
+            f"{_download_stamp(result.context.generated_at)}.md"
+        )
+        response = Response(result.markdown, mimetype="text/markdown")
         response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
         return response
 
@@ -502,7 +647,28 @@ def _latest_payload(value: LatestRenphoReport) -> dict[str, Any]:
     }
 
 
+def _archive_payload(value: ArchiveStatus) -> dict[str, Any]:
+    return {
+        "path": os.environ.get("GARMIN_SYNC_ARCHIVE_DISPLAY_PATH", str(value.root)),
+        "ready": value.exists,
+        "daily_documents": value.daily_documents,
+        "weekly_documents": value.weekly_documents,
+        "last_updated": value.last_updated,
+    }
+
+
+def _download_stamp(generated_at: datetime) -> str:
+    """Return a filesystem-safe Berlin timestamp for generated downloads."""
+    localized = (
+        generated_at.replace(tzinfo=BERLIN)
+        if generated_at.tzinfo is None
+        else generated_at.astimezone(BERLIN)
+    )
+    return localized.strftime("%Y-%m-%d_%H-%M-%S")
+
+
 def _report_payload(report_id: str, result: WeeklyReportResult) -> dict[str, Any]:
+    """Serialize normalized report models without exposing provider payloads or PDF bytes."""
     report = result.report
     return {
         "id": report_id,
@@ -517,6 +683,7 @@ def _report_payload(report_id: str, result: WeeklyReportResult) -> dict[str, Any
             "pressure_days": report.pressure.days_covered,
             "weight_points": len(report.body),
         },
+        "vo2_max": report.vo2_max,
         "activities": [
             {
                 "id": item.activity_id,
@@ -538,12 +705,47 @@ def _report_payload(report_id: str, result: WeeklyReportResult) -> dict[str, Any
     }
 
 
+def _health_context_payload(context_id: str, result: HealthContextResult) -> dict[str, Any]:
+    context = result.context
+    return {
+        "id": context_id,
+        "status": result.status.value,
+        "period": context.period.kind,
+        "start_date": context.period.start_date.isoformat(),
+        "end_date": context.period.end_date.isoformat(),
+        "generated_at": context.generated_at.isoformat(),
+        "archived": result.archived,
+        "summary": {
+            "activities": context.training_summary.total_sessions,
+            "training_minutes": round(context.training_summary.total_duration_minutes),
+            "pressure_days": context.blood_pressure.days_covered,
+            "body_measurements": len(context.body_measurements),
+        },
+        "availability": context.availability.model_dump(mode="json"),
+    }
+
+
 def _job_payload(job_id: str, state: WebApiState, *, include_result: bool) -> dict[str, Any]:
+    """Project a Future into UI state, consuming completed results once per job."""
+    if (
+        state.job_generations.get(job_id, 0) != state.account_generation
+        and state.job_kinds.get(job_id) not in _LOGIN_KINDS
+    ):
+        return {
+            "id": job_id,
+            "state": "error",
+            "error": {"code": "account_changed", "message": "Account changed; start again"},
+        }
     if job_id in state.completed_jobs:
         return state.completed_jobs[job_id]
     job = state.jobs.jobs[job_id]
     broker = state.mfa.get(job_id)
-    if broker is not None and broker.requested.is_set() and not broker.supplied.is_set():
+    if (
+        not job.future.done()
+        and broker is not None
+        and broker.requested.is_set()
+        and not broker.supplied.is_set()
+    ):
         return {"id": job_id, "state": "awaiting_input", "stage": "Enter Garmin MFA code"}
     if not job.future.done():
         progress = state.service.get_report_progress(job_id)
@@ -554,7 +756,7 @@ def _job_payload(job_id: str, state: WebApiState, *, include_result: bool) -> di
         }
     try:
         result = job.future.result()
-        payload = _consume_result(result, state)
+        payload = _consume_result(result, state, kind=state.job_kinds.get(job_id, "weekly-report"))
         final = {"id": job_id, "state": _terminal_state(result), "result": payload}
     except Exception as exc:
         final = {
@@ -569,10 +771,11 @@ def _job_payload(job_id: str, state: WebApiState, *, include_result: bool) -> di
     return {key: value for key, value in final.items() if key != "result"}
 
 
-def _consume_result(result: Any, state: WebApiState) -> dict[str, Any] | list[Any]:
+def _consume_result(
+    result: Any, state: WebApiState, *, kind: str = "weekly-report"
+) -> dict[str, Any] | list[Any]:
+    """Publish completed results while keeping dashboard periods separate from exports."""
     if isinstance(result, OperationResult):
-        if result.message.startswith("Connected:"):
-            state.garmin_status[:] = [result]
         state.events.append(f"Operation: {result.status.value}")
         return {"type": "operation", "status": result.status.value, "message": result.message}
     if isinstance(result, RenphoPreview):
@@ -597,6 +800,9 @@ def _consume_result(result: Any, state: WebApiState) -> dict[str, Any] | list[An
         state.latest_error.clear()
         state.events.append("RENPHO latest measurement refreshed")
         return {"type": "renpho_latest", **_latest_payload(result)}
+    if isinstance(result, ArchiveStatus):
+        state.events.append("Local archive structure prepared")
+        return {"type": "archive_status", **_archive_payload(result)}
     if isinstance(result, RenphoHistory):
         return {
             "type": "renpho_history",
@@ -621,9 +827,9 @@ def _consume_result(result: Any, state: WebApiState) -> dict[str, Any] | list[An
         }
     if isinstance(result, WeeklyReportResult):
         report_id = secrets.token_urlsafe(24)
-        state.weekly_reports.clear()
         state.weekly_reports[report_id] = result
-        state.latest_weekly_id[:] = [report_id]
+        if kind == "weekly-report":
+            state.latest_weekly_id[:] = [report_id]
         period_days = (result.report.end_date - result.report.start_date).days + 1
         if period_days in {1, 7, 30}:
             state.dashboard_reports[period_days] = (report_id, result)
@@ -632,6 +838,15 @@ def _consume_result(result: Any, state: WebApiState) -> dict[str, Any] | list[An
             f"to {result.report.end_date}"
         )
         return {"type": "weekly_report", **_report_payload(report_id, result)}
+    if isinstance(result, HealthContextResult):
+        context_id = secrets.token_urlsafe(24)
+        state.health_contexts[context_id] = result
+        state.latest_health_context_ids[result.context.period.kind] = context_id
+        state.events.append(f"AI context: {result.status.value} for {result.context.period.kind}")
+        return {
+            "type": "health_context",
+            **_health_context_payload(context_id, result),
+        }
     if isinstance(result, list):
         return [
             {
@@ -649,17 +864,13 @@ def _terminal_state(result: Any) -> str:
     """Reflect the business outcome instead of treating a completed Future as success."""
     if isinstance(result, (RenphoPreview, LatestRenphoReport, RenphoHistory)):
         return "verified"
-    if isinstance(result, WeeklyReportResult):
+    if isinstance(result, (WeeklyReportResult, HealthContextResult)):
         return "verified" if result.status == ResultStatus.SUCCESS else result.status.value
     statuses: list[str] = []
     if isinstance(result, OperationResult):
         statuses = [result.status.value]
     elif isinstance(result, list):
-        statuses = [
-            item.status.value
-            for item in result
-            if isinstance(item, OperationResult)
-        ]
+        statuses = [item.status.value for item in result if isinstance(item, OperationResult)]
     if not statuses:
         return "verified"
     if "uncertain" in statuses:
@@ -701,11 +912,13 @@ def _safe_error(exc: Exception) -> str:
     return "Internal error; no data was changed"
 
 
+_LOGIN_KINDS = {"garmin-login", "renpho-login"}
 _AVATAR_HOSTS = {"s3.amazonaws.com"}
 _AVATAR_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
 def _avatar_bytes(url: str, cache: AvatarCache) -> tuple[bytes, str]:
+    """Fetch a bounded, signature-checked image from an allowed HTTPS host into memory."""
     if cache.content is not None and cache.mimetype is not None and cache.expires_at > monotonic():
         return cache.content, cache.mimetype
     current = url

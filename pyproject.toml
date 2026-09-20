@@ -1,7 +1,7 @@
 [project]
 name = "garmin-health-sync"
-version = "1.0.0"
-description = "Private local health cockpit and bidirectional Garmin/RENPHO sync"
+version = "1.1.0"
+description = "Local Garmin health dashboard, RENPHO body sync and private Markdown archive"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
@@ -72,6 +72,7 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 "src/garmin_sync/weekly_report.py" = ["E501"]
 "src/garmin_sync/weekly_pdf.py" = ["E501"]
 "src/garmin_sync/weekly_web.py" = ["E501"]
+"src/garmin_sync/ai_context.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"

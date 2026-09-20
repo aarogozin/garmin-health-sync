@@ -7,6 +7,7 @@
 .ruff_cache/
 .mypy_cache/
 .coverage
+.coverage.*
 htmlcov/
 .gstack/
 dist/
@@ -26,3 +27,7 @@ weekly-health-report-*.pdf
 renpho-body-composition-*.pdf
 docker/secret.key
 docker/*.enc
+# Defensive patterns for a private Markdown archive or Docker host mount.
+Garmin Health Sync/
+garmin-health-archive/
+local-health-data/

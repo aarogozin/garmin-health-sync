@@ -130,6 +130,27 @@ def test_authentication_requires_credentials() -> None:
         RenphoCloud(Credentials(None), FakeAPI).authenticate()
 
 
+def test_clear_session_uses_newly_saved_credentials() -> None:
+    accounts: list[str] = []
+
+    class AccountAPI(FakeAPI):
+        def __init__(self, email: str, *_: Any, **__: Any) -> None:
+            super().__init__()
+            accounts.append(email)
+
+    credentials = Credentials()
+    cloud = RenphoCloud(credentials, AccountAPI)
+    old = cloud.authenticate()
+    credentials.value = ("new@example.com", "other")
+    cloud.clear_session()
+    assert cloud.authenticate() is not old
+    assert accounts == ["a@example.com", "new@example.com"]
+    credentials.value = None
+    cloud.clear_session()
+    with pytest.raises(RenphoError, match="No saved"):
+        cloud.authenticate()
+
+
 def test_authentication_adds_required_activity_headers() -> None:
     class Session:
         def __init__(self) -> None:

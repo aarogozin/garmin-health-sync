@@ -61,6 +61,20 @@
       "title": "ApiError",
       "type": "object"
     },
+    "ArchiveBackfillRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "days": {
+          "default": 90,
+          "maximum": 365,
+          "minimum": 1,
+          "title": "Days",
+          "type": "integer"
+        }
+      },
+      "title": "ArchiveBackfillRequest",
+      "type": "object"
+    },
     "DashboardRefreshRequest": {
       "additionalProperties": false,
       "properties": {
@@ -99,6 +113,25 @@
         "password"
       ],
       "title": "GarminLoginRequest",
+      "type": "object"
+    },
+    "HealthContextRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "period": {
+          "enum": [
+            "current",
+            "7d",
+            "30d"
+          ],
+          "title": "Period",
+          "type": "string"
+        }
+      },
+      "required": [
+        "period"
+      ],
+      "title": "HealthContextRequest",
       "type": "object"
     },
     "MfaRequest": {

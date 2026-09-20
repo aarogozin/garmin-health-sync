@@ -8,6 +8,8 @@ from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import cast
 
+from .ai_context import ContextPeriod
+from .archive import ArchiveError
 from .garmin import GarminClient, GarminSyncError, UploadUncertain
 from .models import BloodPressure, BodyComposition, ValidationError, parse_local_datetime
 from .operation_lock import SyncBusyError
@@ -26,6 +28,7 @@ Input = Callable[[str], str]
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Define terminal commands independently of secure-store initialization."""
     parser = argparse.ArgumentParser(
         prog="garmin-sync", description="Manually log health data to Garmin Connect"
     )
@@ -52,6 +55,24 @@ def build_parser() -> argparse.ArgumentParser:
     combined = sub.add_parser("sync", help="run synchronization jobs")
     combined_sub = combined.add_subparsers(dest="sync_command", required=True)
     combined_sub.add_parser("daily", help="sync the latest RENPHO measurement to Garmin")
+    archive = sub.add_parser("archive", help="manage the private local Markdown health archive")
+    archive_sub = archive.add_subparsers(dest="archive_command", required=True)
+    archive_sub.add_parser("setup", help="create the local Markdown archive")
+    backfill = archive_sub.add_parser(
+        "backfill", help="collect and archive previous health history"
+    )
+    backfill.add_argument(
+        "--days", type=int, default=90, help="history window (1-365, default: 90)"
+    )
+    archive_sub.add_parser("refresh", help="collect and archive today's health snapshot")
+    archive_sub.add_parser("status", help="show the local archive status")
+    context = sub.add_parser("context", help="generate AI-ready health context files")
+    context_sub = context.add_subparsers(dest="context_command", required=True)
+    generate = context_sub.add_parser("generate", help="collect JSON and Markdown context")
+    generate.add_argument("period_value", nargs="?", choices=("current", "7d", "30d"))
+    generate.add_argument(
+        "--period", dest="period_option", choices=("current", "7d", "30d")
+    )
     schedule = sub.add_parser("schedule", help="manage daily RENPHO sync with macOS launchd")
     schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
     install = schedule_sub.add_parser("install", help="install or update the daily schedule")
@@ -64,15 +85,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Dispatch a CLI operation and translate known failures into safe messages and exit codes."""
     args = build_parser().parse_args(argv)
     if args.diagnostic:
         logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
         logging.info(
             "Safe diagnostics enabled; HTTP headers, bodies, credentials, and tokens are suppressed"
         )
-    store, renpho_store = configured_stores()
-    client = GarminClient(store)
     try:
+        store, renpho_store = configured_stores()
+        client = GarminClient(store)
         if args.command == "login":
             return login_command(client)
         if args.command == "add":
@@ -84,6 +106,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return renpho_command(args, client, renpho_store)
         if args.command == "sync":
             return daily_sync(client, RenphoCloud(renpho_store), SyncState())
+        if args.command == "archive":
+            return archive_command(
+                args, HealthSyncService(client, RenphoCloud(renpho_store), SyncState())
+            )
+        if args.command == "context":
+            return context_command(
+                args, HealthSyncService(client, RenphoCloud(renpho_store), SyncState())
+            )
         if args.command == "gui":
             from .gui import run_gui
 
@@ -100,28 +130,83 @@ def main(argv: Sequence[str] | None = None) -> int:
         ScheduleError,
         ValidationError,
         SyncBusyError,
+        ArchiveError,
     ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2 if not isinstance(exc, UploadUncertain) else 3
 
 
 def daily_sync(garmin: GarminClient, cloud: RenphoCloud, state: SyncState) -> int:
+    """Run an unattended weight upload, then refresh an enabled archive independently."""
     service = HealthSyncService(garmin, cloud, state)
     exit_code = 0
     print("Daily sync: RENPHO weight → Garmin")
     try:
         for result in service.sync_renpho(service.preview_renpho("latest")):
             print(f"  weight sync: {result.status.value}")
-            if result.status in {ResultStatus.ERROR, ResultStatus.UNCERTAIN}:
+            if result.status not in {ResultStatus.SUCCESS, ResultStatus.ALREADY_EXISTS}:
                 exit_code = max(exit_code, 3 if result.status == ResultStatus.UNCERTAIN else 2)
     except (GarminSyncError, RenphoError, SyncStateError, SyncBusyError) as exc:
         print(f"  error: {exc}", file=sys.stderr)
         exit_code = max(exit_code, 2)
 
+    print("Daily archive: normalized Garmin and RENPHO health snapshot")
+    try:
+        refresh = getattr(service, "archive_refresh", None)
+        if not callable(refresh):
+            print("  archive: unavailable")
+            return exit_code
+        archive_result = refresh()
+        print(f"  archive: {archive_result.status.value}")
+        if archive_result.status in {
+            ResultStatus.ERROR,
+            ResultStatus.UNCERTAIN,
+            ResultStatus.AUTH_REQUIRED,
+            ResultStatus.RATE_LIMITED,
+        }:
+            exit_code = max(exit_code, 3 if archive_result.status == ResultStatus.UNCERTAIN else 2)
+    except (GarminSyncError, RenphoError, SyncBusyError, ArchiveError) as exc:
+        print(f"  archive error: {exc}", file=sys.stderr)
+        exit_code = max(exit_code, 2)
+
     return exit_code
 
 
+def archive_command(args: argparse.Namespace, service: HealthSyncService) -> int:
+    """Manage the optional Markdown workspace using the same service as the GUI."""
+    if args.archive_command == "setup":
+        result = service.archive_initialize()
+        print(result.message)
+        return 0 if result.status in {ResultStatus.SUCCESS, ResultStatus.PARTIAL} else 2
+    if args.archive_command == "status":
+        status = service.archive_status()
+        print(f"Archive: {status.root}")
+        print(f"Daily notes: {status.daily_documents}")
+        print(f"Weekly notes: {status.weekly_documents}")
+        print(f"Last update: {status.last_updated or 'not available'}")
+        return 0
+    result = (
+        service.archive_backfill(args.days)
+        if args.archive_command == "backfill"
+        else service.archive_refresh()
+    )
+    print(result.message)
+    return 0 if result.status in {ResultStatus.SUCCESS, ResultStatus.PARTIAL} else 2
+
+
+def context_command(args: argparse.Namespace, service: HealthSyncService) -> int:
+    """Generate synchronized JSON/Markdown files in the private local archive."""
+    period = args.period_option or args.period_value or "30d"
+    result = service.build_health_context(cast(ContextPeriod, period))
+    print(
+        f"AI health context {period}: {result.status.value}; "
+        + ("archived" if result.archived else "available in memory only")
+    )
+    return 0 if result.status in {ResultStatus.SUCCESS, ResultStatus.PARTIAL} else 2
+
+
 def login_command(client: GarminClient, input_fn: Input = input) -> int:
+    """Collect transient Garmin credentials and persist only the authenticated session."""
     email = _required("Garmin email: ", input_fn)
     password = getpass.getpass("Garmin password (not saved): ")
     if not password:
@@ -132,6 +217,7 @@ def login_command(client: GarminClient, input_fn: Input = input) -> int:
 
 
 def add_command(client: GarminClient, input_fn: Input = input) -> int:
+    """Validate and preview a measurement before a single confirmed Garmin write."""
     client.connect()
     kind = _choice("Measurement [1 body composition, 2 blood pressure]: ", {"1", "2"}, input_fn)
     measurement = body_wizard(input_fn) if kind == "1" else pressure_wizard(input_fn)
@@ -150,6 +236,7 @@ def add_command(client: GarminClient, input_fn: Input = input) -> int:
 
 
 def logout_command(store: TokenStore, input_fn: Input = input) -> int:
+    """Remove the selected local Garmin session only after terminal confirmation."""
     if not _confirm("Remove the saved Garmin session? [y/N]: ", input_fn):
         print("Cancelled.")
         return 0
@@ -163,6 +250,7 @@ def renpho_command(
     store: RenphoStore,
     input_fn: Input = input,
 ) -> int:
+    """Authenticate RENPHO, inspect its session, or dispatch a confirmed body sync."""
     if args.renpho_command == "login":
         email = _required("RENPHO email: ", input_fn)
         password = getpass.getpass("RENPHO password: ")
@@ -201,6 +289,7 @@ def renpho_sync(
     *,
     assume_yes: bool = False,
 ) -> int:
+    """Preview normalized candidates and fail the command when any upload is unverified."""
     service = HealthSyncService(garmin, cloud, state)
     preview = service.preview_renpho(mode)
     candidates = list(preview.candidates)
@@ -228,18 +317,19 @@ def renpho_sync(
         print(f"{index}/{len(candidates)} {result.status.value}: {result.message}")
         if result.status == ResultStatus.UNCERTAIN:
             raise UploadUncertain(result.message)
-        if result.status == ResultStatus.ERROR:
+        if result.status not in {ResultStatus.SUCCESS, ResultStatus.ALREADY_EXISTS}:
             raise GarminSyncError(result.message)
     print("RENPHO sync completed.")
     return 0
 
 
 def schedule_command(args: argparse.Namespace) -> int:
+    """Manage the native development LaunchAgent; Docker uses the root launcher bridge."""
     from . import schedule
 
     if args.schedule_command == "install":
         target = schedule.install(hour=args.hour, minute=args.minute)
-        print(f"Daily bidirectional sync installed for {args.hour:02d}:{args.minute:02d}.")
+        print(f"Daily weight sync installed for {args.hour:02d}:{args.minute:02d}.")
         print(f"LaunchAgent: {target}")
         print(f"Log: {schedule.log_path()}")
         return 0
@@ -262,6 +352,7 @@ def schedule_command(args: argparse.Namespace) -> int:
 
 
 def body_wizard(input_fn: Input = input) -> BodyComposition:
+    """Collect body values in canonical units; the model validates physiological bounds."""
     measured_at = _datetime_prompt(input_fn)
     return BodyComposition(
         measured_at=measured_at,
@@ -278,6 +369,7 @@ def body_wizard(input_fn: Input = input) -> BodyComposition:
 
 
 def pressure_wizard(input_fn: Input = input) -> BloodPressure:
+    """Collect one local-time blood-pressure reading for later review and confirmation."""
     measured_at = _datetime_prompt(input_fn)
     return BloodPressure(
         measured_at=measured_at,

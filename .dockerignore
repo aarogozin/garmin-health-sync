@@ -18,3 +18,6 @@ dist
 tmp
 *.log
 *.pdf
+Garmin Health Sync/
+garmin-health-archive/
+local-health-data/

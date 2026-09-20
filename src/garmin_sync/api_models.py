@@ -42,6 +42,10 @@ class WeeklyReportRequest(ApiModel):
     map_tiles_enabled: bool = False
 
 
+class HealthContextRequest(ApiModel):
+    period: Literal["current", "7d", "30d"]
+
+
 class DashboardRefreshRequest(ApiModel):
     period_days: Literal[1, 7, 30] = 7
 
@@ -49,6 +53,10 @@ class DashboardRefreshRequest(ApiModel):
 class ScheduleRequest(ApiModel):
     hour: int = Field(ge=0, le=23)
     minute: int = Field(ge=0, le=59)
+
+
+class ArchiveBackfillRequest(ApiModel):
+    days: int = Field(default=90, ge=1, le=365)
 
 
 class ApiError(ApiModel):
@@ -70,8 +78,10 @@ def exported_schema() -> dict[str, Any]:
         PressureRequest,
         SyncPreviewRequest,
         WeeklyReportRequest,
+        HealthContextRequest,
         DashboardRefreshRequest,
         ScheduleRequest,
+        ArchiveBackfillRequest,
         ApiEnvelope,
     )
     definitions: dict[str, Any] = {}

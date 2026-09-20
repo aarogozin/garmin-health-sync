@@ -36,6 +36,7 @@ CHART_COLORS = {
 
 
 def render_weekly_report_pdf(report: WeeklyHealthReport) -> bytes:
+    """Build a paginated report entirely in memory from an already-normalized snapshot."""
     output = BytesIO()
     doc = _ReportDoc(
         output,
@@ -44,7 +45,7 @@ def render_weekly_report_pdf(report: WeeklyHealthReport) -> bytes:
         rightMargin=16 * mm,
         topMargin=18 * mm,
         bottomMargin=17 * mm,
-        title="7-day health report",
+        title=f"{report.period_days}-day health report",
         author="Garmin Health Sync",
     )
     styles = _styles()
@@ -102,7 +103,7 @@ def _cover(report: WeeklyHealthReport, s: dict[str, ParagraphStyle]) -> list[Flo
     ]
     cards = Table([[Paragraph(v, s["metric"]) for v, _ in metrics], [Paragraph(label, s["metric_label"]) for _, label in metrics]], colWidths=[43 * mm] * 4, rowHeights=[12 * mm, 7 * mm])
     cards.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), PALE), ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D9E3F0")), ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.white), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 5)]))
-    result: list[Flowable] = [Paragraph("PERSONAL HEALTH SUMMARY", s["eyebrow"]), Paragraph("7-day health report", s["title"]), Paragraph(f"{report.start_date:%d %b %Y} - {report.end_date:%d %b %Y}", s["body"]), Spacer(1, 6 * mm), cards, Paragraph("Weekly overview", s["h1"])]
+    result: list[Flowable] = [Paragraph("PERSONAL HEALTH SUMMARY", s["eyebrow"]), Paragraph(f"{report.period_days}-day health report", s["title"]), Paragraph(f"{report.start_date:%d %b %Y} - {report.end_date:%d %b %Y}", s["body"]), Spacer(1, 6 * mm), cards, Paragraph("Period overview", s["h1"])]
     for item in report.insights:
         source = (
             f" <link href='{item.source_url}' color='#4776E6'>{item.source_title}</link>"
