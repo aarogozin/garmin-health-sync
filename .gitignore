@@ -7,10 +7,17 @@
 .ruff_cache/
 .mypy_cache/
 .coverage
+.coverage.*
 htmlcov/
 .gstack/
 dist/
 build/
+frontend/*.tsbuildinfo
+frontend/test-results/
+frontend/playwright-report/
+frontend/vite.config.js
+frontend/vite.config.d.ts
+frontend/node_modules/
 *.egg-info/
 __pycache__/
 *.py[cod]
@@ -20,3 +27,7 @@ weekly-health-report-*.pdf
 renpho-body-composition-*.pdf
 docker/secret.key
 docker/*.enc
+# Defensive patterns for a private Markdown archive or Docker host mount.
+Garmin Health Sync/
+garmin-health-archive/
+local-health-data/

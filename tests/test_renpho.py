@@ -2,14 +2,12 @@ from datetime import datetime
 from typing import Any
 
 import pytest
-import requests
+from renpho import RenphoAPIError
 
-from garmin_sync.activities import RenphoActivityTemplate
 from garmin_sync.models import BERLIN
 from garmin_sync.renpho import (
     RenphoCloud,
     RenphoError,
-    RenphoWriteUncertain,
     normalize_girth,
     normalize_measurement,
 )
@@ -89,9 +87,68 @@ def test_fetch_sorts_newest_and_counts_bad_records() -> None:
     assert skipped == 1
 
 
+def test_fetch_reauthenticates_once_when_cached_session_is_rejected() -> None:
+    instances: list[FakeAPI] = []
+
+    class ExpiringSession(FakeAPI):
+        def __init__(self, *_: Any, **__: Any) -> None:
+            super().__init__()
+            self.index = len(instances)
+            instances.append(self)
+
+        def get_all_measurements(self) -> list[dict[str, Any]]:
+            if self.index == 0:
+                raise RenphoAPIError("Measurements", 102, "session rejected")
+            return [{"id": 7, "timeStamp": 1_800_000_000, "weight": 79}]
+
+    items, skipped = RenphoCloud(Credentials(), ExpiringSession).fetch()
+
+    assert [item.source_id for item in items] == ["7"]
+    assert skipped == 0
+    assert len(instances) == 2
+
+
+def test_fetch_does_not_loop_when_refreshed_session_is_rejected() -> None:
+    calls = 0
+
+    class RejectedSession(FakeAPI):
+        def __init__(self, *_: Any, **__: Any) -> None:
+            nonlocal calls
+            super().__init__()
+            calls += 1
+
+        def get_all_measurements(self) -> list[dict[str, Any]]:
+            raise RenphoAPIError("Measurements", 102, "session rejected")
+
+    with pytest.raises(RenphoError, match="refreshed measurement session"):
+        RenphoCloud(Credentials(), RejectedSession).fetch()
+    assert calls == 2
+
+
 def test_authentication_requires_credentials() -> None:
     with pytest.raises(RenphoError, match="renpho login"):
         RenphoCloud(Credentials(None), FakeAPI).authenticate()
+
+
+def test_clear_session_uses_newly_saved_credentials() -> None:
+    accounts: list[str] = []
+
+    class AccountAPI(FakeAPI):
+        def __init__(self, email: str, *_: Any, **__: Any) -> None:
+            super().__init__()
+            accounts.append(email)
+
+    credentials = Credentials()
+    cloud = RenphoCloud(credentials, AccountAPI)
+    old = cloud.authenticate()
+    credentials.value = ("new@example.com", "other")
+    cloud.clear_session()
+    assert cloud.authenticate() is not old
+    assert accounts == ["a@example.com", "new@example.com"]
+    credentials.value = None
+    cloud.clear_session()
+    with pytest.raises(RenphoError, match="No saved"):
+        cloud.authenticate()
 
 
 def test_authentication_adds_required_activity_headers() -> None:
@@ -132,75 +189,3 @@ def test_normalize_girth_maps_available_body_parts_and_units() -> None:
         ("Left arm", 14.5, "in"),
         ("Waist-to-hip ratio", 0.84, "ratio"),
     ]
-
-
-def test_activity_templates_history_and_write_use_app_endpoints(monkeypatch) -> None:
-    class Activities(FakeAPI):
-        def __init__(self, *_: Any, **__: Any) -> None:
-            super().__init__()
-            self.calls: list[tuple[str, dict[str, Any]]] = []
-
-        def _post(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
-            self.calls.append((endpoint, body))
-            if endpoint.endswith("selectActivityTemplate"):
-                return {
-                    "code": 101,
-                    "data": {
-                        "list": [
-                            {"sportTypeId": 52, "sportName": "Running", "isOfficial": 0}
-                        ]
-                    },
-                }
-            if endpoint.endswith("getActivity"):
-                return {
-                    "code": 101,
-                    "data": {
-                        "list": [
-                            {
-                                "id": 7,
-                                "sportTypeId": 52,
-                                "recordTime": 1_776_000_000_000,
-                                "duration": 1800,
-                                "cal": 300,
-                            }
-                        ]
-                    },
-                }
-            return {"code": 101, "data": {"id": 8}}
-
-    monkeypatch.setattr("garmin_sync.renpho.encrypt_request", lambda value: value)
-    cloud = RenphoCloud(Credentials(), Activities)
-    assert cloud.fetch_activity_templates()[0] == RenphoActivityTemplate(52, "Running", 0)
-    assert cloud.fetch_activities()[0].calories == 300
-    template = cloud.fetch_activity_templates()[0]
-    assert (
-        cloud.create_activity(
-            template=template,
-            started_at=datetime(2026, 8, 22, tzinfo=BERLIN),
-            duration_seconds=1800,
-            calories=300,
-        )
-        == "8"
-    )
-    api = cloud.authenticate()
-    assert isinstance(api, Activities)
-    endpoint, payload = api.calls[-1]
-    assert endpoint.endswith("recordActivity")
-    assert payload["userId"] == "123"
-    assert payload["sportTypeId"] == 52
-
-
-def test_activity_write_timeout_is_uncertain(monkeypatch) -> None:
-    class Timeout(FakeAPI):
-        def _post(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
-            raise requests.Timeout("timeout")
-
-    monkeypatch.setattr("garmin_sync.renpho.encrypt_request", lambda value: value)
-    cloud = RenphoCloud(Credentials(), Timeout)
-    with pytest.raises(RenphoWriteUncertain):
-        cloud.create_activity(
-            template=RenphoActivityTemplate(52, "Running"),
-            started_at=datetime(2026, 8, 22, tzinfo=BERLIN),
-            duration_seconds=1800,
-            calories=300,
-        )

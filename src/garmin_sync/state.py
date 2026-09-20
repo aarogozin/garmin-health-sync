@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import os
 import tempfile
@@ -10,6 +9,7 @@ from typing import Any
 
 
 def default_state_path() -> Path:
+    """Keep the duplicate-protection ledger in configured container or native application data."""
     if data_dir := os.environ.get("GARMIN_SYNC_DATA_DIR"):
         return Path(data_dir) / "state.json"
     return Path.home() / "Library" / "Application Support" / "garmin-health-sync" / "state.json"
@@ -26,6 +26,7 @@ class SyncState:
         self.path = path or default_state_path()
 
     def synced_ids(self) -> set[str]:
+        """Load confirmed RENPHO source IDs; a missing ledger represents a fresh installation."""
         try:
             data: Any = json.loads(self.path.read_text())
         except FileNotFoundError:
@@ -36,25 +37,10 @@ class SyncState:
         return {str(value) for value in values}
 
     def mark_synced(self, source_id: str) -> None:
-        self._update("renpho_synced_ids", source_id, hashed=False)
+        """Atomically record a verified upload; callers serialize updates with the write lock."""
+        self._update("renpho_synced_ids", source_id)
 
-    def activity_synced(self, activity_id: str) -> bool:
-        return self._activity_hash(activity_id) in self._values("garmin_activity_hashes")
-
-    def mark_activity_synced(self, activity_id: str) -> None:
-        self._update("garmin_activity_hashes", activity_id, hashed=True)
-
-    def _values(self, key: str) -> set[str]:
-        try:
-            data: Any = json.loads(self.path.read_text())
-        except FileNotFoundError:
-            return set()
-        except (OSError, json.JSONDecodeError) as exc:
-            raise SyncStateError(f"Could not read sync state: {self.path}") from exc
-        values = data.get(key, []) if isinstance(data, dict) else []
-        return {str(value) for value in values}
-
-    def _update(self, key: str, source_id: str, *, hashed: bool) -> None:
+    def _update(self, key: str, source_id: str) -> None:
         try:
             data: Any = json.loads(self.path.read_text())
         except FileNotFoundError:
@@ -64,7 +50,7 @@ class SyncState:
         if not isinstance(data, dict):
             data = {}
         values = {str(value) for value in data.get(key, [])}
-        values.add(self._activity_hash(source_id) if hashed else source_id)
+        values.add(source_id)
         data[key] = sorted(values)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
@@ -78,7 +64,3 @@ class SyncState:
             with contextlib.suppress(OSError):
                 os.unlink(temporary)
             raise SyncStateError(f"Could not update sync state: {self.path}") from exc
-
-    @staticmethod
-    def _activity_hash(activity_id: str) -> str:
-        return hashlib.sha256(f"garmin-activity:{activity_id}".encode()).hexdigest()

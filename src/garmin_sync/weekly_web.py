@@ -11,6 +11,8 @@ CHART_JAVASCRIPT = r"""
     return node;
   };
   const finite = value => typeof value === 'number' && Number.isFinite(value);
+  const colors = {blue:'#006F9E',cyan:'#167C92',battery:'#287F62',sleep:'#385FAD',deep:'#263D67',rem:'#7257C7',violet:'#7257C7',stress:'#B86000',amber:'#B86000',red:'#B13D4D',neutral:'#66788A'};
+  const chartColor = series => colors[series.color_token] || colors.blue;
   const tooltip = document.getElementById('chart-tooltip');
   const showTip = (event, text) => {
     tooltip.textContent = text;
@@ -33,24 +35,24 @@ CHART_JAVASCRIPT = r"""
       const points = [];
       series.values.forEach((value, index) => {
         if (!finite(value)) return;
-        const x = chart.labels.length < 2 ? width / 2 : pad + index * (width - pad * 2) / (chart.labels.length - 1);
+        const x = chart.timestamps.length < 2 ? width / 2 : pad + index * (width - pad * 2) / (chart.timestamps.length - 1);
         const y = height - pad - (value - low) * (height - pad * 2) / (high - low);
         points.push(`${x},${y}`);
-        const circle = svgNode('circle', {cx:x,cy:y,r:4,fill:series.color,tabindex:0});
-        const label = `${chart.labels[index]} - ${series.name}: ${value}`;
+        const circle = svgNode('circle', {cx:x,cy:y,r:4,fill:chartColor(series),tabindex:0});
+        const label = `${chart.timestamps[index]} - ${series.name}: ${value}`;
         circle.addEventListener('pointermove', event => showTip(event, label));
         circle.addEventListener('pointerleave', hideTip);
         circle.addEventListener('focus', () => { tooltip.textContent = label; tooltip.hidden = false; });
         circle.addEventListener('blur', hideTip);
         group.append(circle);
       });
-      if (points.length > 1) group.prepend(svgNode('polyline', {points:points.join(' '),fill:'none',stroke:series.color,'stroke-width':3}));
+      if (points.length > 1) group.prepend(svgNode('polyline', {points:points.join(' '),fill:'none',stroke:chartColor(series),'stroke-width':3}));
       svg.append(group);
     });
     lifestyle.forEach(item => {
-      const index = chart.labels.findIndex(label => label.startsWith(item.date));
-      if (index < 0 || chart.labels.length < 2) return;
-      const x = pad + index * (width - pad * 2) / (chart.labels.length - 1);
+      const index = chart.timestamps.findIndex(label => label.startsWith(item.date));
+      if (index < 0 || chart.timestamps.length < 2) return;
+      const x = pad + index * (width - pad * 2) / (chart.timestamps.length - 1);
       const marker = svgNode('line', {
         x1:x,y1:pad,x2:x,y2:height-pad,class:'lifestyle-marker',tabindex:0
       });
@@ -66,7 +68,7 @@ CHART_JAVASCRIPT = r"""
     const legend = document.createElement('div'); legend.className = 'chart-legend';
     chart.series.forEach((series, index) => {
       const button = document.createElement('button');
-      button.type = 'button'; button.textContent = series.name; button.style.borderColor = series.color;
+      button.type = 'button'; button.textContent = series.name; button.style.borderColor = chartColor(series);
       button.setAttribute('aria-pressed', 'true');
       button.addEventListener('click', () => {
         const group = svg.querySelector(`[data-series="${index}"]`);

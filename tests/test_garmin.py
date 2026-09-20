@@ -82,9 +82,8 @@ class FakeAPI:
     def get_blood_pressure(self, startdate: str, enddate: str | None = None):
         return self.pressure
 
-    def get_activities(self, start: int = 0, limit: int = 20):
-        return []
-
+    def get_max_metrics(self, cdate: str):
+        return {"generic": {"vo2MaxValue": 48.7}}
 
 def test_login_saves_tokens_not_password() -> None:
     store = MemoryStore()
@@ -99,29 +98,121 @@ def test_connect_requires_saved_session() -> None:
         GarminClient(MemoryStore(), FakeAPI).connect()
 
 
-def test_all_time_activities_are_paginated() -> None:
-    class Paged(FakeAPI):
-        def get_activities(self, start: int = 0, limit: int = 20):
-            if start == 0:
-                return [{"activityId": value} for value in range(limit)]
-            if start == limit:
-                return {"activityList": [{"activityId": limit}]}
-            return []
-
-    client = GarminClient(MemoryStore("x" * 600), Paged)
-    client.connect()
-    assert len(client.read_all_activities(page_size=2)) == 3
+def test_max_metrics_are_cached_as_a_read_only_garmin_request() -> None:
+    client = GarminClient(MemoryStore("token"), FakeAPI)
+    assert client.read_max_metrics("2026-08-15")["generic"]["vo2MaxValue"] == 48.7
 
 
-def test_all_time_activities_stop_when_pagination_repeats() -> None:
-    class Repeating(FakeAPI):
-        def get_activities(self, start: int = 0, limit: int = 20):
-            return [{"activityId": value} for value in range(limit)]
+def test_activity_exercise_sets_and_splits_are_read_once_without_retry() -> None:
+    class Activities(FakeAPI):
+        calls = 0
 
-    client = GarminClient(MemoryStore("x" * 600), Repeating)
-    client.connect()
-    with pytest.raises(GarminSyncError, match="pagination did not advance"):
-        client.read_all_activities(page_size=2)
+        def get_activity_exercise_sets(self, activity_id: int | str) -> dict[str, Any]:
+            self.calls += 1
+            return {"exerciseSets": [{"exerciseName": "Bench Press"}]}
+
+        def get_activity_splits(self, activity_id: str) -> dict[str, Any]:
+            self.calls += 1
+            return {"splits": [{"splitNumber": 1}]}
+
+    client = GarminClient(MemoryStore("token"), Activities)
+    assert client.read_activity_exercise_sets("42")["exerciseSets"]
+    assert client.read_activity_splits("42")["splits"]
+    api = client._api
+    assert isinstance(api, Activities) and api.calls == 2
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (GarminConnectAuthenticationError("401"), AuthenticationRequired),
+        (GarminConnectTooManyRequestsError("429"), RateLimited),
+    ],
+)
+def test_activity_exercise_read_errors_are_safe_and_not_retried(error, expected) -> None:
+    class Broken(FakeAPI):
+        calls = 0
+
+        def get_activity_exercise_sets(self, activity_id: int | str) -> dict[str, Any]:
+            self.calls += 1
+            raise error
+
+    client = GarminClient(MemoryStore("token"), Broken)
+    with pytest.raises(expected):
+        client.read_activity_exercise_sets("42")
+    api = client._api
+    assert isinstance(api, Broken) and api.calls == 1
+
+
+def test_successful_account_login_discards_cached_health_reads() -> None:
+    class AccountAPI(FakeAPI):
+        def __init__(self, email: str = "old", *_: Any, **__: Any) -> None:
+            super().__init__()
+            self.email = email
+
+        def get_stress_data(self, cdate: str) -> dict[str, str]:
+            return {"account": self.email}
+
+    client = GarminClient(MemoryStore(), AccountAPI)
+    client.login("old", "secret", lambda: "1")
+    assert client.read_stress("2026-08-12") == {"account": "old"}
+    client.login("new", "secret", lambda: "1")
+    assert client.read_stress("2026-08-12") == {"account": "new"}
+
+
+def test_clear_session_discards_api_and_cached_reads() -> None:
+    client = GarminClient(MemoryStore(), FakeAPI)
+    client.login("old", "secret", lambda: "1")
+    client._read_cache["example"] = (0, {"private": True})
+    client.clear_session()
+    assert client._api is None
+    assert client._read_cache == {}
+
+
+@pytest.mark.parametrize("method", [
+    "has_body_composition", "has_body_composition_on_date", "has_blood_pressure",
+])
+@pytest.mark.parametrize("error,expected", [
+    (GarminConnectAuthenticationError("401 private diagnostic"), AuthenticationRequired),
+    (GarminConnectTooManyRequestsError("429 private diagnostic"), RateLimited),
+    (RuntimeError("private diagnostic"), GarminSyncError),
+])
+def test_duplicate_reads_translate_vendor_errors(method, error, expected) -> None:
+    class Broken(FakeAPI):
+        def get_body_composition(self, *args):
+            raise error
+
+        def get_blood_pressure(self, *args):
+            raise error
+
+    client = GarminClient(MemoryStore("x" * 600), Broken)
+    measured_at = datetime(2026, 8, 12, tzinfo=BERLIN)
+    measurement = (
+        BloodPressure(measured_at, 120, 80, 60) if method == "has_blood_pressure"
+        else BodyComposition(measured_at, 80)
+    )
+    with pytest.raises(expected) as caught:
+        getattr(client, method)(measurement)
+    assert "private diagnostic" not in str(caught.value)
+
+
+def test_profile_prefers_human_name_over_social_profile_uuid() -> None:
+    class ProfileSession(FakeSession):
+        def connectapi(self, _path: str) -> dict[str, str]:
+            return {
+                "displayName": "123e4567-e89b-42d3-a456-426614174000",
+                "fullName": "Different Name",
+            }
+
+    class ProfileAPI(FakeAPI):
+        def __init__(self, *_: Any, **__: Any) -> None:
+            super().__init__()
+            self.client = ProfileSession()
+
+    client = GarminClient(MemoryStore("x" * 600), ProfileAPI)
+    profile = client.profile()
+    assert profile.display_name == "Test User"
+    assert profile.initials == "TU"
 
 
 @pytest.mark.parametrize(

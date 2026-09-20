@@ -1,5 +1,7 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from io import BytesIO
 
+import pytest
 from pypdf import PdfReader
 
 from garmin_sync.models import BERLIN, BodyComposition
@@ -99,6 +101,20 @@ def test_weekly_mapping_deduplicates_body_and_normalizes_pressure_time() -> None
     assert report.body[0].body_fat_pct == 18
 
 
+def test_weekly_mapping_extracts_the_garmin_vo2_max_estimate() -> None:
+    raw = _raw()
+    raw["max_metrics"] = {"generic": {"vo2MaxValue": 48.7, "other": 120}}
+    report = build_report(
+        start_date=date(2026, 8, 9),
+        end_date=date(2026, 8, 15),
+        garmin=raw,
+        renpho=[],
+        available=["max_metrics"],
+        unavailable=[],
+    )
+    assert report.vo2_max == 48.7
+
+
 def test_weekly_html_escapes_values_and_pdf_is_vector_a4() -> None:
     report = build_report(
         start_date=date(2026, 8, 9),
@@ -137,6 +153,20 @@ def test_sparse_data_produces_cautious_insight() -> None:
     )
     assert report.availability.unavailable == ("Garmin session", "renpho")
     assert any("not enough data" in item.text for item in report.insights)
+
+
+@pytest.mark.parametrize("days", [1, 30])
+def test_report_headings_match_the_actual_period(days: int) -> None:
+    end = date(2026, 8, 15)
+    report = build_report(
+        start_date=end - timedelta(days=days - 1), end_date=end,
+        garmin={}, renpho=[], available=[], unavailable=[],
+    )
+    title = f"{days}-day health report"
+    assert title in render_weekly_html(report, "csrf", "report")
+    pdf = PdfReader(BytesIO(render_weekly_report_pdf(report)))
+    assert pdf.metadata is not None and pdf.metadata.title == title
+    assert title in (pdf.pages[0].extract_text() or "")
 
 
 def test_activity_link_rejects_non_numeric_api_identifier() -> None:
@@ -272,6 +302,12 @@ def test_comprehensive_domains_lifestyle_associations_and_private_route() -> Non
     payload = chart_payload(report)
     assert payload["routes"][0]["points"] == [[52.5, 13.4], [52.51, 13.42]]
     assert payload["map_tiles_enabled"] is True
+    charts = {chart["id"]: chart for chart in payload["charts"]}
+    assert charts["stress-battery"]["axes"][0]["unit"] == "score"
+    assert charts["heart-rate"]["axes"][0]["unit"] == "bpm"
+    assert charts["body-kg"]["axes"][0]["unit"] == "kg"
+    assert charts["body-fat"]["axes"][0]["unit"] == "%"
+    assert all("color" not in series for chart in charts.values() for series in chart["series"])
     assert "Private trail" not in repr(report.availability)
 
 

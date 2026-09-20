@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+# Docker-first local launcher for Garmin Health Sync on macOS.
+set -euo pipefail
+
+# launchd starts with a minimal PATH; Docker Desktop's CLI must also be discoverable there.
+export PATH="$PATH:/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin"
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+RUNTIME_ROOT="${GARMIN_SYNC_RUNTIME_DIR:-$HOME/Library/Application Support/Garmin Health Sync Docker}"
+ARCHIVE_ROOT="${GARMIN_SYNC_ARCHIVE_HOST_DIR:-$HOME/Documents/Garmin Health Sync}"
+if [[ -z "${GARMIN_SYNC_ARCHIVE_HOST_DIR:-}" && -f "$RUNTIME_ROOT/archive.path" ]]; then
+  ARCHIVE_ROOT="$(cat "$RUNTIME_ROOT/archive.path")"
+fi
+KEY_PATH="$RUNTIME_ROOT/secret.key"
+ENV_PATH="$RUNTIME_ROOT/compose.env"
+HELPER_PATH="$RUNTIME_ROOT/health-sync-host-helper"
+HELPER_CHECKSUM_PATH="$RUNTIME_ROOT/health-sync-host-helper.sha256"
+HELPER_PID_PATH="$RUNTIME_ROOT/host-helper.pid"
+HELPER_READY_PATH="$RUNTIME_ROOT/host-helper.json"
+HELPER_SOURCE_PATH="$RUNTIME_ROOT/host-helper.source.sha256"
+
+die() { echo "health-sync: $*" >&2; exit 1; }
+
+# Use the existing project name so upgrades keep the same Compose-managed data volume.
+compose() { docker compose --project-directory "$ROOT" --env-file "$ENV_PATH" "$@"; }
+
+# Start Docker Desktop only when a Docker operation actually needs the daemon.
+ensure_docker() {
+  command -v docker >/dev/null 2>&1 || die "Docker Desktop is required: https://www.docker.com/products/docker-desktop/"
+  if docker info >/dev/null 2>&1; then return; fi
+  if [[ "$(uname -s)" == "Darwin" ]]; then open -a Docker >/dev/null 2>&1 || true; fi
+  for _ in $(seq 1 60); do
+    docker info >/dev/null 2>&1 && return
+    sleep 2
+  done
+  die "Docker Desktop did not become ready within two minutes"
+}
+
+# Initialize only on explicit start/update; status/logs must never create a replacement key.
+prepare_paths() {
+  umask 077
+  for item in "$RUNTIME_ROOT" "$ARCHIVE_ROOT"; do
+    [[ "$item" == /* && "$item" != / && "$item" != "$HOME" && "$item" != "$ROOT" ]] \
+      || die "Choose an absolute, dedicated runtime/archive directory"
+    [[ "$item" != *$'\n'* && "$item" != *$'\r'* && ! -L "$item" ]] \
+      || die "Runtime/archive paths must be real directories without line breaks"
+  done
+  mkdir -p "$RUNTIME_ROOT" "$ARCHIVE_ROOT"
+  chmod 700 "$RUNTIME_ROOT" "$ARCHIVE_ROOT"
+  # Concurrent starts must not generate different keys for the same credential volume.
+  mkdir "$RUNTIME_ROOT/launcher.lock" 2>/dev/null \
+    || die "Another launcher is starting; if it crashed, remove the empty launcher.lock directory"
+  trap 'rmdir "$RUNTIME_ROOT/launcher.lock" 2>/dev/null || true' EXIT
+  [[ ! -L "$KEY_PATH" && ! -L "$ENV_PATH" && ! -L "$RUNTIME_ROOT/archive.path" ]] \
+    || die "Runtime files must not be symbolic links"
+  if [[ ! -f "$KEY_PATH" ]]; then
+    [[ ! -f "$ENV_PATH" ]] || die "The encryption key is missing; restore it from backup before starting"
+    command -v openssl >/dev/null 2>&1 || die "openssl is required to create the Docker credential key"
+    openssl rand -base64 32 > "$KEY_PATH"
+  fi
+  chmod 600 "$KEY_PATH"
+  printf '%s\n' "$ARCHIVE_ROOT" > "$RUNTIME_ROOT/archive.path"
+}
+
+# A stale PID may belong to another process; check the executable before signalling it.
+stop_helper() {
+  if [[ -f "$HELPER_PID_PATH" ]]; then
+    local pid
+    pid="$(cat "$HELPER_PID_PATH" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$(ps -p "$pid" -o command= 2>/dev/null || true)" == "$HELPER_PATH "* ]]; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  fi
+  [[ ! -e "$HELPER_PID_PATH" ]] || unlink "$HELPER_PID_PATH"
+  [[ ! -e "$HELPER_READY_PATH" ]] || unlink "$HELPER_READY_PATH"
+}
+
+# Rebuild when either the executable or its source/build definition has changed.
+build_helper() {
+  [[ "$(uname -s)" == "Darwin" ]] || return 0
+  local source_hash
+  source_hash="$(shasum -a 256 "$ROOT/host_helper/main.go" "$ROOT/host_helper/go.mod" "$ROOT/Dockerfile" | shasum -a 256 | cut -d ' ' -f 1)"
+  if [[ -x "$HELPER_PATH" && -f "$HELPER_CHECKSUM_PATH" ]] \
+    && [[ "$(cat "$HELPER_SOURCE_PATH" 2>/dev/null || true)" == "$source_hash" ]] \
+    && shasum -a 256 --check "$HELPER_CHECKSUM_PATH" >/dev/null 2>&1; then
+    return
+  fi
+  [[ ! -e "$HELPER_PATH" ]] || unlink "$HELPER_PATH"
+  [[ ! -e "$HELPER_CHECKSUM_PATH" ]] || unlink "$HELPER_CHECKSUM_PATH"
+  ensure_docker
+  local output
+  output="$(mktemp -d "$RUNTIME_ROOT/helper-build.XXXXXX")"
+  docker build --target host-helper-export --output "type=local,dest=$output" "$ROOT" >/dev/null
+  [[ -f "$output/health-sync-host-helper" ]] || die "could not build the macOS host helper"
+  mv "$output/health-sync-host-helper" "$HELPER_PATH"
+  chmod 700 "$HELPER_PATH"
+  shasum -a 256 "$HELPER_PATH" > "$HELPER_CHECKSUM_PATH"
+  chmod 600 "$HELPER_CHECKSUM_PATH"
+  printf '%s\n' "$source_hash" > "$HELPER_SOURCE_PATH"
+  rmdir "$output"
+}
+
+# Rotate capabilities only alongside a container restart, never during schedule/status calls.
+ensure_bridge() {
+  [[ "$(uname -s)" == "Darwin" ]] || return 0
+  stop_helper
+  build_helper
+  local token port
+  token="$(openssl rand -hex 32)"
+  GARMIN_SYNC_HOST_BRIDGE_TOKEN="$token" GARMIN_SYNC_ARCHIVE_HOST_DIR="$ARCHIVE_ROOT" \
+    GARMIN_SYNC_RUNTIME_DIR="$RUNTIME_ROOT" \
+    nohup "$HELPER_PATH" --project-root "$ROOT" --ready-file "$HELPER_READY_PATH" \
+    </dev/null >/dev/null 2>&1 &
+  echo "$!" > "$HELPER_PID_PATH"
+  chmod 600 "$HELPER_PID_PATH"
+  for _ in $(seq 1 30); do [[ -s "$HELPER_READY_PATH" ]] && break; sleep 0.1; done
+  [[ -s "$HELPER_READY_PATH" ]] || die "macOS schedule helper did not start"
+  port="$(sed -n 's/.*"port":\([0-9][0-9]*\).*/\1/p' "$HELPER_READY_PATH")"
+  [[ "$port" =~ ^[0-9]+$ ]] || die "macOS schedule helper returned an invalid port"
+  printf 'GARMIN_SYNC_HOST_BRIDGE_URL=http://host.docker.internal:%s\n' "$port" >> "$ENV_PATH"
+  printf 'GARMIN_SYNC_HOST_BRIDGE_TOKEN=%s\n' "$token" >> "$ENV_PATH"
+}
+
+# Single-quoted Compose values preserve dollar signs, spaces and apostrophes in host paths.
+env_value() {
+  local escaped="${2//\\/\\\\}"
+  escaped="${escaped//\'/\\\'}"
+  printf "%s='%s'\n" "$1" "$escaped"
+}
+
+# Publish a complete private environment file atomically, outside the source checkout.
+write_env() {
+  local temporary
+  temporary="$(mktemp "$RUNTIME_ROOT/compose.XXXXXX")"
+  {
+    env_value GARMIN_SYNC_ARCHIVE_HOST_DIR "$ARCHIVE_ROOT"
+    env_value GARMIN_SYNC_ARCHIVE_DISPLAY_PATH "$ARCHIVE_ROOT"
+    env_value GARMIN_SYNC_SECRET_KEY_PATH "$KEY_PATH"
+  } > "$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$ENV_PATH"
+}
+
+# Forward commands using the configuration chosen by start; preserve the running GUI token.
+prepare_runtime() {
+  [[ -f "$ENV_PATH" && -f "$KEY_PATH" ]] || die "Run './health-sync start' first; restore a missing key from backup"
+  ensure_docker
+}
+
+wait_for_health() {
+  for _ in $(seq 1 40); do
+    curl --fail --silent --show-error --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/health >/dev/null 2>&1 && return
+    sleep 1
+  done
+  die "the local dashboard did not become healthy; run './health-sync logs'"
+}
+
+# Host CLI uses loopback; only the container uses Docker Desktop's host DNS alias.
+bridge_request() {
+  [[ -f "$ENV_PATH" ]] || die "run './health-sync start' first"
+  local url token
+  url="$(sed -n 's/^GARMIN_SYNC_HOST_BRIDGE_URL=//p' "$ENV_PATH" | tail -n 1)"
+  token="$(sed -n 's/^GARMIN_SYNC_HOST_BRIDGE_TOKEN=//p' "$ENV_PATH" | tail -n 1)"
+  [[ -n "$url" && -n "$token" ]] || die "run './health-sync start' to start the macOS schedule helper"
+  local host_url="${url/host.docker.internal/127.0.0.1}"
+  curl --fail --silent --show-error --connect-timeout 2 --max-time 10 \
+    -H "X-Garmin-Health-Sync-Token: $token" "$host_url$1" "${@:2}"
+}
+
+cmd="${1:-start}"
+case "$cmd" in
+  start)
+    ensure_docker
+    prepare_paths
+    write_env
+    ensure_bridge
+    compose up --build -d
+    wait_for_health
+    if [[ "$(uname -s)" == "Darwin" ]]; then open http://127.0.0.1:8080; fi
+    echo "Garmin Health Sync is running at http://127.0.0.1:8080"
+    echo "Markdown archive: $ARCHIVE_ROOT"
+    ;;
+  stop)
+    prepare_runtime
+    compose down
+    stop_helper
+    ;;
+  status)
+    prepare_runtime
+    compose ps
+    echo "Markdown archive: $ARCHIVE_ROOT"
+    ;;
+  logs)
+    prepare_runtime
+    shift || true
+    compose logs --tail=100 "$@"
+    ;;
+  update)
+    ensure_docker
+    prepare_paths
+    write_env
+    ensure_bridge
+    compose build --pull
+    compose up -d
+    wait_for_health
+    ;;
+  sync|archive)
+    prepare_runtime
+    shift
+    compose run --rm app "$cmd" "$@"
+    ;;
+  context)
+    prepare_runtime
+    shift
+    compose run --rm app "$cmd" "$@"
+    ;;
+  schedule)
+    prepare_runtime
+    action="${2:-status}"
+    case "$action" in
+      status) bridge_request /schedule/status; echo ;;
+      install)
+        hour="${3:-9}"; minute="${4:-0}"
+        [[ "$hour" =~ ^[0-9]{1,2}$ && "$minute" =~ ^[0-9]{1,2}$ ]] || die "Hour and minute must be integers"
+        hour=$((10#$hour)); minute=$((10#$minute))
+        ((hour <= 23 && minute <= 59)) || die "Hour must be 0-23 and minute must be 0-59"
+        bridge_request /schedule/install -X POST -H 'Content-Type: application/json' --data "{\"hour\":$hour,\"minute\":$minute}"; echo ;;
+      run) bridge_request /schedule/run -X POST; echo ;;
+      remove|uninstall) bridge_request /schedule/remove -X POST; echo ;;
+      *) die "usage: ./health-sync schedule install [hour minute]|status|run|remove" ;;
+    esac
+    ;;
+  *)
+    cat >&2 <<'EOF'
+Usage: ./health-sync {start|stop|status|logs|update|sync daily|archive ...|context ...|schedule ...}
+EOF
+    exit 2
+    ;;
+esac

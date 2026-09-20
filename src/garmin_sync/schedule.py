@@ -15,14 +15,17 @@ class ScheduleError(RuntimeError):
 
 
 def plist_path() -> Path:
+    """Return the native development LaunchAgent path, separate from the Docker helper."""
     return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 
 
 def log_path() -> Path:
+    """Return the native schedule's operational log path."""
     return Path.home() / "Library" / "Logs" / "GarminHealthSync" / "renpho-sync.log"
 
 
 def install(*, hour: int, minute: int) -> Path:
+    """Write a private plist bound to the current Python interpreter and load it in launchd."""
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
         raise ScheduleError("Hour must be 0-23 and minute must be 0-59")
 
@@ -68,6 +71,7 @@ def install(*, hour: int, minute: int) -> Path:
 
 
 def uninstall() -> bool:
+    """Unload and remove only the native Garmin Health Sync LaunchAgent."""
     target = plist_path()
     if not target.exists():
         return False
@@ -82,6 +86,7 @@ def uninstall() -> bool:
 
 
 def is_loaded() -> bool:
+    """Inspect launchd without running the scheduled synchronization."""
     result = subprocess.run(
         [LAUNCHCTL, "print", f"gui/{os.getuid()}/{LABEL}"],  # nosec B603
         check=False,
@@ -92,6 +97,7 @@ def is_loaded() -> bool:
 
 
 def is_legacy() -> bool:
+    """Recognize the old weight-only command so the user can update its schedule."""
     try:
         payload = plistlib.loads(plist_path().read_bytes())
     except (FileNotFoundError, OSError, plistlib.InvalidFileException):
@@ -108,6 +114,7 @@ def is_legacy() -> bool:
 
 
 def run_now() -> None:
+    """Trigger the installed native job using its fixed launchd label."""
     result = subprocess.run(
         [LAUNCHCTL, "kickstart", f"gui/{os.getuid()}/{LABEL}"],  # nosec B603
         check=False,
@@ -119,5 +126,5 @@ def run_now() -> None:
 
 
 def _launchctl_error(stderr: str) -> str:
-    detail = stderr.strip().splitlines()[-1] if stderr.strip() else "unknown launchctl error"
-    return f"Could not configure the macOS schedule: {detail}"
+    """Hide host command output, which can contain private paths or environment details."""
+    return "Could not configure the macOS schedule; check that the user session is logged in"

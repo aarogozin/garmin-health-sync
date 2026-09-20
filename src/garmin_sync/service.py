@@ -2,18 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from enum import StrEnum
+from typing import Any
 
-from .activities import (
-    ActivitySyncCandidate,
-    ActivitySyncPreview,
-    ActivitySyncResult,
-    exact_activity_match,
-    mapped_template,
-    normalize_garmin_activity,
-    template_matches_mapping,
+from .ai_context import (
+    ContextPeriod,
+    HealthContextExport,
+    render_context_json,
+    render_context_markdown,
 )
+from .ai_context import build_health_context as normalize_health_context
+from .archive import ArchiveError, ArchiveStatus, LocalHealthArchive
 from .body_report import ReportDocument, ReportProvider
 from .garmin import (
     AuthenticationRequired,
@@ -24,13 +24,7 @@ from .garmin import (
 )
 from .models import BERLIN, BloodPressure
 from .operation_lock import write_lock
-from .renpho import (
-    RenphoCloud,
-    RenphoError,
-    RenphoGirthMeasurement,
-    RenphoMeasurement,
-    RenphoWriteUncertain,
-)
+from .renpho import RenphoCloud, RenphoError, RenphoGirthMeasurement, RenphoMeasurement
 from .state import SyncState
 from .weekly_pdf import render_weekly_report_pdf
 from .weekly_report import WeeklyHealthReport, build_report
@@ -100,6 +94,15 @@ class WeeklyReportResult:
     pdf: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class HealthContextResult:
+    status: ResultStatus
+    context: HealthContextExport
+    json_content: str
+    markdown: str
+    archived: bool
+
+
 class HealthSyncService:
     """UI-independent application operations shared by CLI and web GUI."""
 
@@ -109,21 +112,29 @@ class HealthSyncService:
         renpho: RenphoCloud,
         state: SyncState,
         reports: ReportProvider | None = None,
+        archive: LocalHealthArchive | None = None,
     ) -> None:
         self.garmin = garmin
         self.renpho = renpho
         self.state = state
         self.reports = reports or ReportProvider()
+        self.archive = archive or LocalHealthArchive()
         self._report_progress: dict[str, object] = {"stage": "Idle", "completed": 0, "total": 5}
 
     def status(self) -> OperationResult:
+        """Validate the saved Garmin session and return a user-facing connection result."""
         try:
             name = self.garmin.connect()
             return OperationResult(ResultStatus.SUCCESS, f"Connected: {name}")
+        except AuthenticationRequired as exc:
+            return OperationResult(ResultStatus.AUTH_REQUIRED, str(exc))
+        except RateLimited as exc:
+            return OperationResult(ResultStatus.RATE_LIMITED, str(exc))
         except GarminSyncError as exc:
             return OperationResult(ResultStatus.ERROR, str(exc))
 
     def add_pressure(self, measurement: BloodPressure) -> OperationResult:
+        """Serialize a duplicate-checked upload and distinguish uncertain writes from success."""
         try:
             with write_lock():
                 self.garmin.connect()
@@ -135,10 +146,15 @@ class HealthSyncService:
             return OperationResult(ResultStatus.SUCCESS, "Blood pressure uploaded and verified")
         except UploadUncertain as exc:
             return OperationResult(ResultStatus.UNCERTAIN, str(exc))
+        except AuthenticationRequired as exc:
+            return OperationResult(ResultStatus.AUTH_REQUIRED, str(exc))
+        except RateLimited as exc:
+            return OperationResult(ResultStatus.RATE_LIMITED, str(exc))
         except GarminSyncError as exc:
             return OperationResult(ResultStatus.ERROR, str(exc))
 
     def preview_renpho(self, mode: str) -> RenphoPreview:
+        """Select unsynced candidates without changing Garmin or the local sync ledger."""
         measurements, skipped = self.renpho.fetch()
         synced = self.state.synced_ids()
         if mode == "latest":
@@ -151,180 +167,33 @@ class HealthSyncService:
             mode, tuple(item for item in candidates if item.source_id not in synced), skipped
         )
 
-    def preview_activities(
-        self, period: str, *, now: datetime | None = None
-    ) -> ActivitySyncPreview:
-        current = (now or datetime.now(BERLIN)).astimezone(BERLIN)
-        self._report_progress = {
-            "stage": "Reading Garmin activities",
-            "completed": 0,
-            "total": 3,
-        }
-        self.garmin.connect()
-        if period == "all":
-            raw = self.garmin.read_all_activities()
-            threshold = None
-        elif period in {"day", "month"}:
-            threshold = (
-                current.astimezone(UTC)
-                - timedelta(hours=24 if period == "day" else 24 * 30)
-            ).astimezone(BERLIN)
-            raw = self.garmin.read_activities(
-                threshold.date().isoformat(), current.date().isoformat()
-            )
-        else:
-            raise RenphoError("Unknown activity sync period")
-        self._report_progress = {
-            "stage": "Reading RENPHO activities",
-            "completed": 1,
-            "total": 3,
-        }
-        normalized = [normalize_garmin_activity(item) for item in raw]
-        invalid_count = sum(item is None for item in normalized)
-        activities = [item for item in normalized if item is not None]
-        if threshold is not None:
-            activities = [
-                item
-                for item in activities
-                if threshold.timestamp() <= item.started_at.timestamp() <= current.timestamp()
-            ]
-        templates = {item.template_id: item for item in self.renpho.fetch_activity_templates()}
-        existing = self.renpho.fetch_activities()
-        candidates: list[ActivitySyncCandidate] = []
-        unknown = []
-        duplicates = 0
-        for activity in sorted(activities, key=lambda item: item.started_at):
-            mapped = mapped_template(activity)
-            server_template = templates.get(mapped.template_id) if mapped is not None else None
-            if (
-                mapped is None
-                or server_template is None
-                or not template_matches_mapping(mapped, server_template)
-            ):
-                unknown.append(activity)
-                continue
-            candidate = ActivitySyncCandidate(activity, server_template)
-            if self.state.activity_synced(activity.source_id) or any(
-                exact_activity_match(candidate, record) for record in existing
-            ):
-                duplicates += 1
-                continue
-            candidates.append(candidate)
-        self._report_progress = {
-            "stage": "Preview ready",
-            "completed": 3,
-            "total": 3,
-            "uploaded": 0,
-            "skipped": invalid_count + len(unknown) + duplicates,
-        }
-        return ActivitySyncPreview(
-            period, tuple(candidates), tuple(unknown), invalid_count, duplicates
-        )
-
-    def sync_activities(
-        self, preview: ActivitySyncPreview
-    ) -> list[ActivitySyncResult]:
-        results: list[ActivitySyncResult] = []
-        total = len(preview.candidates)
-        uploaded = 0
-        skipped = preview.invalid_count + len(preview.unknown) + preview.duplicate_count
-        with write_lock():
-            existing = list(self.renpho.fetch_activities())
-            for index, candidate in enumerate(preview.candidates, start=1):
-                activity = candidate.activity
-                self._report_progress = {
-                    "stage": f"Uploading activity {index} of {total}",
-                    "completed": index - 1,
-                    "total": max(1, total),
-                    "uploaded": uploaded,
-                    "skipped": skipped,
-                }
-                if self.state.activity_synced(activity.source_id) or any(
-                    exact_activity_match(candidate, record) for record in existing
-                ):
-                    self.state.mark_activity_synced(activity.source_id)
-                    skipped += 1
-                    results.append(
-                        ActivitySyncResult(
-                            ResultStatus.ALREADY_EXISTS.value,
-                            activity.source_id,
-                            f"{activity.name}: already exists in RENPHO",
-                        )
-                    )
-                    continue
-                try:
-                    self.renpho.create_activity(
-                        template=candidate.template,
-                        started_at=activity.started_at,
-                        duration_seconds=activity.duration_seconds,
-                        calories=activity.calories,
-                    )
-                except RenphoWriteUncertain as exc:
-                    results.append(
-                        ActivitySyncResult(
-                            ResultStatus.UNCERTAIN.value, activity.source_id, str(exc)
-                        )
-                    )
-                    break
-                except RenphoError as exc:
-                    results.append(
-                        ActivitySyncResult(ResultStatus.ERROR.value, activity.source_id, str(exc))
-                    )
-                    break
-                try:
-                    verified = list(self.renpho.fetch_activities())
-                except RenphoError:
-                    results.append(
-                        ActivitySyncResult(
-                            ResultStatus.UNCERTAIN.value,
-                            activity.source_id,
-                            "RENPHO accepted the upload response but verification failed; "
-                            "check RENPHO before retrying",
-                        )
-                    )
-                    break
-                if not any(exact_activity_match(candidate, record) for record in verified):
-                    results.append(
-                        ActivitySyncResult(
-                            ResultStatus.UNCERTAIN.value,
-                            activity.source_id,
-                            "RENPHO did not return the uploaded activity; "
-                            "check RENPHO before retrying",
-                        )
-                    )
-                    break
-                existing = verified
-                self.state.mark_activity_synced(activity.source_id)
-                uploaded += 1
-                results.append(
-                    ActivitySyncResult(
-                        ResultStatus.SUCCESS.value,
-                        activity.source_id,
-                        f"{activity.name}: uploaded and verified",
-                    )
-                )
-        self._report_progress = {
-            "stage": "Activity sync complete",
-            "completed": len(results),
-            "total": max(1, total),
-            "uploaded": uploaded,
-            "skipped": skipped,
-        }
-        return results
-
     def latest_renpho(self) -> RenphoMeasurement:
+        """Fetch normalized RENPHO history and require at least one usable measurement."""
         measurements, _skipped = self.renpho.fetch()
         if not measurements:
             raise RenphoError("RENPHO returned no measurements")
         return measurements[0]
 
     def latest_report(self) -> LatestRenphoReport:
+        """Resolve the newest measurement's report into a displayable local document."""
         measurement = self.latest_renpho()
         if measurement.report is None:
             raise RenphoError("The latest RENPHO measurement has no report data")
         return LatestRenphoReport(measurement, self.reports.resolve(measurement.report))
 
+    def sync_latest_renpho_if_needed(self) -> list[OperationResult]:
+        """Safely reconcile the newest RENPHO measurement during application startup.
+
+        The normal duplicate, conflict and exact read-back checks still apply. An
+        uncertain Garmin write stops immediately and is never retried here.
+        """
+        measurements, skipped = self.renpho.fetch()
+        if not measurements:
+            return [OperationResult(ResultStatus.ERROR, "RENPHO returned no measurements")]
+        return self.sync_renpho(RenphoPreview("startup", (measurements[0],), skipped))
+
     def renpho_history(self) -> RenphoHistory:
+        """Collect scale and circumference history independently of Garmin upload state."""
         measurements, _skipped = self.renpho.fetch()
         return RenphoHistory(tuple(measurements), tuple(self.renpho.fetch_girth()))
 
@@ -335,13 +204,96 @@ class HealthSyncService:
         include_routes: bool = False,
         map_tiles_enabled: bool = False,
     ) -> WeeklyReportResult:
+        """Build the default seven-day report with optional in-memory route information."""
         return self.build_comprehensive_report(
             end_date=end_date,
             include_routes=include_routes,
             map_tiles_enabled=map_tiles_enabled,
         )
 
+    def build_health_context(self, period: ContextPeriod) -> HealthContextResult:
+        """Collect and render canonical AI context without persisting provider payloads."""
+        # Every export carries both 7- and 30-day summaries. The selected
+        # period only controls raw_data, not the compact comparison windows.
+        requested_days = 30
+        report_result = self.build_comprehensive_report(
+            period=requested_days,
+            lifestyle_context=30,
+            include_routes=False,
+            map_tiles_enabled=False,
+        )
+        context = normalize_health_context(report_result.report, period)
+        json_content = render_context_json(context)
+        markdown = render_context_markdown(context)
+        archived = False
+        if report_result.status == ResultStatus.SUCCESS:
+            try:
+                self.archive.write_context(period, json_content, markdown)
+            except ArchiveError:
+                archived = False
+            else:
+                archived = True
+        return HealthContextResult(
+            report_result.status,
+            context,
+            json_content,
+            markdown,
+            archived,
+        )
+
+    def archive_setup(self) -> ArchiveStatus:
+        return self.archive.setup()
+
+    def archive_initialize(self) -> OperationResult:
+        """Create the workspace and seed it with the agreed 90-day context."""
+        try:
+            self.archive.setup()
+        except ArchiveError as exc:
+            return OperationResult(ResultStatus.ERROR, str(exc))
+        return self.archive_backfill(90)
+
+    def archive_status(self) -> ArchiveStatus:
+        return self.archive.status()
+
+    def archive_report(self, result: WeeklyReportResult) -> OperationResult:
+        """Persist a completed safe report model; never persist an auth/error snapshot."""
+        if result.status not in {ResultStatus.SUCCESS, ResultStatus.PARTIAL}:
+            return OperationResult(
+                result.status,
+                "Archive was not updated because collection did not produce a safe snapshot",
+            )
+        try:
+            status = self.archive.write_report(
+                result.report, preserve_existing=result.status == ResultStatus.PARTIAL
+            )
+        except ArchiveError as exc:
+            return OperationResult(ResultStatus.ERROR, str(exc))
+        return OperationResult(
+            result.status,
+            f"Local archive updated ({status.daily_documents} daily notes)"
+            + (
+                "; existing notes preserved because collection was partial"
+                if result.status == ResultStatus.PARTIAL
+                else ""
+            ),
+        )
+
+    def archive_refresh(self) -> OperationResult:
+        """Collect and persist today's normalized snapshot without changing remote data."""
+        result = self.build_comprehensive_report(period=1, lifestyle_context=30)
+        return self.archive_report(result)
+
+    def archive_backfill(self, days: int = 90) -> OperationResult:
+        """Collect a bounded historical window and persist its normalized daily notes."""
+        if not 1 <= days <= 365:
+            return OperationResult(
+                ResultStatus.ERROR, "Archive history must be between 1 and 365 days"
+            )
+        result = self.build_comprehensive_report(period=days, lifestyle_context=max(30, days))
+        return self.archive_report(result)
+
     def get_report_progress(self, job_id: str | None = None) -> dict[str, object]:
+        """Return a copy of service-wide collection progress; job IDs are compatibility inputs."""
         return dict(self._report_progress)
 
     def build_comprehensive_report(
@@ -352,9 +304,11 @@ class HealthSyncService:
         include_routes: bool = False,
         map_tiles_enabled: bool = False,
     ) -> WeeklyReportResult:
+        """Collect report and lifestyle windows, retaining usable sections when reads fail."""
         end = end_date or datetime.now(BERLIN).date()
         start = end - timedelta(days=period - 1)
-        context_start = end - timedelta(days=lifestyle_context - 1)
+        # Lifestyle context may extend the report window, but must never trim it.
+        context_start = end - timedelta(days=max(period, lifestyle_context) - 1)
         self._report_progress = {"stage": "Core health", "completed": 0, "total": 5}
         raw: dict[str, object] = {}
         available: list[str] = []
@@ -386,7 +340,7 @@ class HealthSyncService:
             except RateLimited:
                 terminal = ResultStatus.RATE_LIMITED
                 unavailable.append(name)
-            except GarminSyncError:
+            except (GarminSyncError, AttributeError):
                 unavailable.append(name)
 
         start_text, end_text = start.isoformat(), end.isoformat()
@@ -394,6 +348,7 @@ class HealthSyncService:
         collect("pressure", lambda: self.garmin.read_blood_pressure(start_text, end_text))
         collect("body", lambda: self.garmin.read_body_composition(start_text, end_text))
         collect("training_status", lambda: self.garmin.read_training_status(end_text))
+        collect("max_metrics", lambda: self.garmin.read_max_metrics(end_text))
         collect(
             "body_battery",
             lambda: _battery_by_date(
@@ -467,10 +422,17 @@ class HealthSyncService:
             day += timedelta(days=1)
         self._report_progress = {"stage": "Lifestyle context", "completed": 2, "total": 5}
         for name, values in (
-            ("stats", stats), ("sleep", sleep), ("readiness", readiness),
-            ("stress", stress), ("hrv", hrv), ("lifestyle", lifestyle),
-            ("spo2", spo2), ("respiration", respiration), ("hydration", hydration),
-            ("nutrition", nutrition), ("daily_events", events),
+            ("stats", stats),
+            ("sleep", sleep),
+            ("readiness", readiness),
+            ("stress", stress),
+            ("hrv", hrv),
+            ("lifestyle", lifestyle),
+            ("spo2", spo2),
+            ("respiration", respiration),
+            ("hydration", hydration),
+            ("nutrition", nutrition),
+            ("daily_events", events),
         ):
             if values:
                 raw[name] = values
@@ -487,7 +449,52 @@ class HealthSyncService:
                 continue
             activity_id = str(item["activityId"])
             try:
-                activity_details[activity_id] = self.garmin.read_activity_detail(activity_id)
+                detail = self.garmin.read_activity_detail(activity_id)
+                if not isinstance(detail, dict):
+                    detail = {}
+                try:
+                    detail["splits"] = self.garmin.read_activity_splits(activity_id)
+                except (AuthenticationRequired, RateLimited):
+                    raise
+                except (GarminSyncError, AttributeError):
+                    unavailable.append(f"activity_splits:{activity_id}")
+                activity_type = item.get("activityType")
+                type_key = (
+                    activity_type.get("typeKey")
+                    if isinstance(activity_type, dict)
+                    else activity_type
+                )
+                normalized_type = str(type_key or "").lower()
+                typed_splits: object = {}
+                if "multi" in normalized_type:
+                    try:
+                        typed_splits = self.garmin.read_activity_typed_splits(activity_id)
+                        detail["typedSplits"] = typed_splits
+                    except (AuthenticationRequired, RateLimited):
+                        raise
+                    except (GarminSyncError, AttributeError):
+                        unavailable.append(f"activity_typed_splits:{activity_id}")
+                if "strength" in normalized_type or "multi" in normalized_type:
+                    try:
+                        exercise_records = _exercise_set_records(
+                            self.garmin.read_activity_exercise_sets(activity_id)
+                        )
+                        for child_id in _strength_segment_ids(typed_splits):
+                            if child_id == activity_id:
+                                continue
+                            exercise_records.extend(
+                                _exercise_set_records(
+                                    self.garmin.read_activity_exercise_sets(child_id)
+                                )
+                            )
+                        detail["exerciseSets"] = {
+                            "exerciseSets": _deduplicate_exercise_records(exercise_records)
+                        }
+                    except (AuthenticationRequired, RateLimited):
+                        raise
+                    except (GarminSyncError, AttributeError):
+                        unavailable.append(f"activity_exercises:{activity_id}")
+                activity_details[activity_id] = detail
             except AuthenticationRequired:
                 terminal = ResultStatus.AUTH_REQUIRED
                 break
@@ -546,6 +553,7 @@ class HealthSyncService:
         return render_weekly_report_pdf(report)
 
     def sync_renpho(self, preview: RenphoPreview) -> list[OperationResult]:
+        """Upload confirmed candidates under a process lock and stop on an uncertain write."""
         results: list[OperationResult] = []
         try:
             with write_lock():
@@ -580,6 +588,10 @@ class HealthSyncService:
                             ResultStatus.SUCCESS, f"{item.body.measured_at.date()}: uploaded"
                         )
                     )
+        except AuthenticationRequired as exc:
+            results.append(OperationResult(ResultStatus.AUTH_REQUIRED, str(exc)))
+        except RateLimited as exc:
+            results.append(OperationResult(ResultStatus.RATE_LIMITED, str(exc)))
         except GarminSyncError as exc:
             results.append(OperationResult(ResultStatus.ERROR, str(exc)))
         return results
@@ -614,3 +626,57 @@ def _collect_daily(
 
 def _battery_by_date(items: list[dict[str, object]]) -> dict[str, dict[str, object]]:
     return {str(item.get("date")): item for item in items if item.get("date")}
+
+
+def _exercise_set_records(value: object) -> list[dict[str, Any]]:
+    """Extract provider set records without manufacturing missing fields."""
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        for key in ("exerciseSets", "sets", "exerciseSetDTOs"):
+            records = value.get(key)
+            if isinstance(records, list):
+                return [item for item in records if isinstance(item, dict)]
+    return []
+
+
+def _strength_segment_ids(value: object) -> list[str]:
+    """Find real child activity IDs for strength legs of a multisport activity."""
+    result: list[str] = []
+
+    def visit(item: object) -> None:
+        if isinstance(item, dict):
+            activity_type = item.get("activityType") or item.get("activityTypeDTO")
+            type_key = (
+                activity_type.get("typeKey")
+                if isinstance(activity_type, dict)
+                else item.get("typeKey") or item.get("activityTypeKey")
+            )
+            activity_id = item.get("activityId") or item.get("childActivityId")
+            if "strength" in str(type_key or "").lower() and activity_id is not None:
+                value_text = str(activity_id)
+                if value_text not in result:
+                    result.append(value_text)
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return result
+
+
+def _deduplicate_exercise_records(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in records:
+        identity = str(
+            item.get("exerciseSetId") or item.get("setId") or item.get("uuid") or repr(item)
+        )
+        if identity not in seen:
+            seen.add(identity)
+            result.append(item)
+    return result

@@ -19,6 +19,7 @@ def default_lock_path() -> Path:
 
 @contextmanager
 def write_lock(path: Path | None = None) -> Iterator[None]:
+    """Hold a nonblocking cross-process lock for a complete duplicate-check/upload operation."""
     target = path or default_lock_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(target, os.O_CREAT | os.O_RDWR, 0o600)

@@ -23,13 +23,20 @@ from reportlab.platypus import (
 from .weekly_report import RoutePoint, WeeklyHealthReport, group_lifestyle_events
 
 INK = colors.HexColor("#182432")
-BLUE = colors.HexColor("#4776E6")
-TEAL = colors.HexColor("#16A085")
+BLUE = colors.HexColor("#006F9E")
+TEAL = colors.HexColor("#167C92")
 PALE = colors.HexColor("#F2F6FC")
 MUTED = colors.HexColor("#66788A")
+CHART_COLORS = {
+    "blue": "#006F9E", "cyan": "#167C92", "battery": "#287F62",
+    "sleep": "#385FAD", "deep": "#263D67", "rem": "#7257C7",
+    "violet": "#7257C7", "stress": "#B86000", "amber": "#B86000",
+    "red": "#B13D4D", "neutral": "#66788A",
+}
 
 
 def render_weekly_report_pdf(report: WeeklyHealthReport) -> bytes:
+    """Build a paginated report entirely in memory from an already-normalized snapshot."""
     output = BytesIO()
     doc = _ReportDoc(
         output,
@@ -38,7 +45,7 @@ def render_weekly_report_pdf(report: WeeklyHealthReport) -> bytes:
         rightMargin=16 * mm,
         topMargin=18 * mm,
         bottomMargin=17 * mm,
-        title="7-day health report",
+        title=f"{report.period_days}-day health report",
         author="Garmin Health Sync",
     )
     styles = _styles()
@@ -96,7 +103,7 @@ def _cover(report: WeeklyHealthReport, s: dict[str, ParagraphStyle]) -> list[Flo
     ]
     cards = Table([[Paragraph(v, s["metric"]) for v, _ in metrics], [Paragraph(label, s["metric_label"]) for _, label in metrics]], colWidths=[43 * mm] * 4, rowHeights=[12 * mm, 7 * mm])
     cards.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), PALE), ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D9E3F0")), ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.white), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 5)]))
-    result: list[Flowable] = [Paragraph("PERSONAL HEALTH SUMMARY", s["eyebrow"]), Paragraph("7-day health report", s["title"]), Paragraph(f"{report.start_date:%d %b %Y} - {report.end_date:%d %b %Y}", s["body"]), Spacer(1, 6 * mm), cards, Paragraph("Weekly overview", s["h1"])]
+    result: list[Flowable] = [Paragraph("PERSONAL HEALTH SUMMARY", s["eyebrow"]), Paragraph(f"{report.period_days}-day health report", s["title"]), Paragraph(f"{report.start_date:%d %b %Y} - {report.end_date:%d %b %Y}", s["body"]), Spacer(1, 6 * mm), cards, Paragraph("Period overview", s["h1"])]
     for item in report.insights:
         source = (
             f" <link href='{item.source_url}' color='#4776E6'>{item.source_title}</link>"
@@ -147,7 +154,7 @@ def _comprehensive(report: WeeklyHealthReport, s: dict[str, ParagraphStyle]) -> 
     result: list[Flowable] = [Paragraph("Comprehensive health metrics", s["h1"])]
     for chart in report.comprehensive.charts:
         result.append(Paragraph(chart.title, s["h2"]))
-        result.append(_MiniChart([[value for value in series.values if value is not None] for series in chart.series], [colors.HexColor(series.color) for series in chart.series]))
+        result.append(_MiniChart([[value for value in series.values if value is not None] for series in chart.series], [colors.HexColor(CHART_COLORS.get(series.color_token, "#006F9E")) for series in chart.series]))
         result.append(
             Paragraph(" · ".join(series.name for series in chart.series), s["small"])
         )

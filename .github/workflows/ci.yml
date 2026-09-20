@@ -25,14 +25,48 @@ jobs:
         with:
           version: "0.12.6"
           enable-cache: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Install Python and dependencies
         run: uv sync --frozen --group dev --python 3.12
       - name: Lint
         run: uv run ruff check .
       - name: Type check
         run: uv run mypy
+      - name: Host-helper contracts and launcher syntax
+        run: |
+          bash -n health-sync
+          docker run --rm --mount type=bind,source="$PWD/host_helper",target=/source,readonly \
+            --workdir /source \
+            golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac \
+            go test ./...
       - name: Test with coverage
         run: uv run pytest --cov=garmin_sync --cov-report=term --cov-fail-under=80
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts
+      - name: Verify generated API contract
+        working-directory: frontend
+        run: |
+          npm run schema
+          git diff --exit-code -- api-schema.json src/generated-api.ts
+      - name: Frontend quality and build
+        working-directory: frontend
+        run: |
+          npm run typecheck
+          npm run lint
+          npm test
+          npm run build
+          npm audit --audit-level=high
+      - name: Install Playwright browser
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: Browser and accessibility tests
+        working-directory: frontend
+        run: npm run test:e2e
       - name: Verify lockfile
         run: uv lock --check
       - name: Verify package version

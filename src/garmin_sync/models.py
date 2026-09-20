@@ -61,6 +61,7 @@ class BodyComposition:
         _bounded("metabolic age", self.metabolic_age, 1, 150)
 
     def garmin_kwargs(self) -> dict[str, Any]:
+        """Map validated fields for upload, excluding Garmin's corrupted metabolic-age import."""
         return {
             "timestamp": self.measured_at.isoformat(),
             "weight": self.weight,
@@ -77,6 +78,7 @@ class BodyComposition:
         }
 
     def summary(self) -> list[tuple[str, str]]:
+        """Format present body-composition values with units for upload confirmation."""
         labels = {
             "weight": "Weight",
             "percent_fat": "Body fat",
@@ -127,6 +129,7 @@ class BloodPressure:
             raise ValidationError("Notes must be at most 500 characters")
 
     def summary(self) -> list[tuple[str, str]]:
+        """Build confirmation labels while preserving the user's optional measurement note."""
         result = [
             ("Measured at", self.measured_at.isoformat(timespec="minutes")),
             ("Blood pressure", f"{self.systolic}/{self.diastolic} mmHg"),
