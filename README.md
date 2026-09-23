@@ -8,6 +8,20 @@ A local health dashboard for Garmin Connect, RENPHO body measurements, and manua
 
 ![Anonymized dashboard preview](docs/images/product-dashboard.png)
 
+## Interface
+
+The desktop dashboard uses the **Atlas** layout: a recovery-first overview, a
+seven-day context chart, quiet supporting metrics, and a persistent operation
+surface for syncs that need attention. Training, recovery, body and blood
+pressure each keep their own unit-aware charts, source labels and accessible data
+tables. On smaller screens the sidebar becomes bottom navigation with a concise
+**More** sheet; no health data is placed in browser storage.
+
+The light theme is the default, with system and dark-theme options in **Settings**.
+The visual system is Garmin-inspired rather than Garmin-branded: it uses neutral
+surfaces and a restrained accessible blue for actions, while retaining the
+project's independent Health Sync identity.
+
 Garmin Health Sync is an independent project. Garmin and RENPHO integrations use unofficial APIs and may stop working when those services change. Reports describe observations; they are not diagnoses or medical records.
 
 ## Start on macOS
@@ -240,7 +254,7 @@ npm --prefix frontend run build
 
 Go is needed only for host-helper development tests; the launcher builds the macOS binary inside Docker. Python and frontend versions are locked; build stages are pinned in the Dockerfile. Production contains Python and compiled web assets, without Node or Go build tools.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for API schema generation, E2E checks and contribution rules, [docs/CODE_REVIEW.md](docs/CODE_REVIEW.md) for the latest audit scope and remaining work, and [CHANGELOG.md](CHANGELOG.md) for historical changes.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for API schema generation, E2E checks and contribution rules, [docs/CODE_REVIEW.md](docs/CODE_REVIEW.md) for an audit scope and tracked follow-up work, and [CHANGELOG.md](CHANGELOG.md) for historical changes.
 
 ## License and attribution
 

@@ -50,6 +50,16 @@ test('navigation, pressure confirmation and accessibility', async ({ page, isMob
   expect(results.violations).toEqual([])
 })
 
+test('mobile More sheet exposes every destination without replacing bottom navigation', async ({ page, isMobile }) => {
+  test.skip(!isMobile, 'This interaction is specific to the mobile shell.')
+  await mockApi(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: 'More' }).click()
+  await expect(page.getByRole('dialog', { name: 'More navigation' })).toBeVisible()
+  await page.getByRole('dialog', { name: 'More navigation' }).getByRole('link', { name: 'Settings' }).click()
+  await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
+})
+
 test('health data is never persisted in browser storage', async ({ page }) => {
   await mockApi(page)
   await page.goto('/')

@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, CheckCircle2, LoaderCircle, ShieldCheck, X } from 'lucide-react'
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, LoaderCircle, ShieldCheck, X } from 'lucide-react'
 import { api } from './api'
 import { reportDays } from './report-period'
 import type { Job } from './types'
@@ -116,12 +116,17 @@ export function useJobs() {
 function ActivityCenter() {
   const context = useContext(JobsContext)
   const [mfa, setMfa] = useState('')
+  const [expanded, setExpanded] = useState(false)
   if (!context) return null
   const items = Object.values(context.jobs)
   if (!items.length) return null
+  const active = items.find((job) => ['queued', 'running', 'awaiting_input'].includes(job.state))
+  const persistent = items.some((job) => ['conflict', 'partial', 'uncertain', 'auth_required', 'rate_limited', 'error'].includes(job.state))
+  const drawerOpen = expanded || persistent
+  const headline = active ? (active.stage ?? 'Operation in progress') : `${items.length} recent operation${items.length === 1 ? '' : 's'}`
   return <aside className="activity-center" aria-label="Activity center">
-    <div className="activity-center__head"><div><span className="eyebrow">Activity center</span><h2>Operations</h2></div><span className="count-badge">{items.length}</span></div>
-    <div className="activity-list">{items.map((job) => <article className="job" key={job.id}>
+    <div className="activity-center__head"><button className="activity-center__toggle" aria-expanded={drawerOpen} onClick={() => setExpanded((value) => !value)}><div>{active ? <LoaderCircle className="spin" /> : <CheckCircle2 />}</div><div><strong>{headline}</strong><small>{active ? active.state.replace('_', ' ') : 'Activity Center'}</small></div>{drawerOpen ? <ChevronDown /> : <ChevronUp />}</button><span className="count-badge">{items.length}</span></div>
+    {drawerOpen && <div className="activity-center__body"><div className="activity-list">{items.map((job) => <article className="job" key={job.id}>
       <div className="job__icon">{['error', 'uncertain', 'conflict', 'auth_required', 'rate_limited'].includes(job.state) ? <AlertCircle /> : ['verified', 'already_exists', 'partial'].includes(job.state) ? <CheckCircle2 /> : job.state === 'awaiting_input' ? <ShieldCheck /> : <LoaderCircle className="spin" />}</div>
       <div className="job__body"><strong>{job.stage ?? titleFor(job)}</strong><small>{job.state.replace('_', ' ')}</small>
         {typeof job.completed === 'number' && <progress value={job.completed} max={Math.max(1, job.total ?? 1)} />}
@@ -130,7 +135,7 @@ function ActivityCenter() {
         <JobResult result={job.result} start={context.start} />
       </div>
       {!['queued', 'running', 'awaiting_input'].includes(job.state) && <button className="icon-button" aria-label="Dismiss operation" onClick={() => context.dismiss(job.id)}><X /></button>}
-    </article>)}</div>
+    </article>)}</div></div>}
   </aside>
 }
 

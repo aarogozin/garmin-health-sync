@@ -1,6 +1,6 @@
 [project]
 name = "garmin-health-sync"
-version = "1.1.0"
+version = "1.2.1"
 description = "Local Garmin health dashboard, RENPHO body sync and private Markdown archive"
 readme = "README.md"
 license = "MIT"
