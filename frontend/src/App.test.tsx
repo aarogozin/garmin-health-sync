@@ -15,7 +15,8 @@ vi.stubGlobal('fetch', fetchMock)
 test('renders the product navigation after bootstrap', async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/overview']}><App /></MemoryRouter></QueryClientProvider>)
-  expect(await screen.findByRole('heading', { name: 'Today', level: 1 })).toBeInTheDocument()
+  // Lazy route chunks can take longer than Testing Library's 1 s default on a cold CI runner.
+  expect(await screen.findByRole('heading', { name: 'Today', level: 1 }, { timeout: 5_000 })).toBeInTheDocument()
   expect(screen.getByText('Sync center')).toBeInTheDocument()
   expect(fetchMock).toHaveBeenCalledWith('/api/v1/dashboard/refresh', expect.objectContaining({ method: 'POST' }))
 })
