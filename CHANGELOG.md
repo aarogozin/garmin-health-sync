@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.0] - 2026-09-23
+
+- Redesign the local React interface around the selected Calm Performance
+  `Atlas` system: recovery-led overview, calmer metric hierarchy, Garmin-blue
+  actions, polished desktop/tablet/mobile navigation, and a compact Activity
+  Center drawer.
+- Split the frontend visual system into token, base, shell, component, and page
+  layers. Keep all existing local API routes, data boundaries, workflows, and
+  sync semantics unchanged.
+- Improve chart legibility with theme-aware SVG presentation, stronger axis and
+  legend treatment, source labels, null gaps, and the existing accessible table
+  fallback.
+- Add mobile safe-area support, 44px controls, capability-gated hover states,
+  press feedback, and reduced-motion fallbacks.
+
 All notable changes to Garmin Health Sync are documented here. The project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
