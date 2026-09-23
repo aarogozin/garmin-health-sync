@@ -254,7 +254,7 @@ npm --prefix frontend run build
 
 Go is needed only for host-helper development tests; the launcher builds the macOS binary inside Docker. Python and frontend versions are locked; build stages are pinned in the Dockerfile. Production contains Python and compiled web assets, without Node or Go build tools.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for API schema generation, E2E checks and contribution rules, [docs/CODE_REVIEW.md](docs/CODE_REVIEW.md) for the latest audit scope and remaining work, and [CHANGELOG.md](CHANGELOG.md) for historical changes.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for API schema generation, E2E checks and contribution rules, [docs/CODE_REVIEW.md](docs/CODE_REVIEW.md) for an audit scope and tracked follow-up work, and [CHANGELOG.md](CHANGELOG.md) for historical changes.
 
 ## License and attribution
 

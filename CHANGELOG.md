@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.1] - 2026-09-23
+
+### Fixed
+
+- Reissued the v1.2 release from `main` so the protected release workflow can build
+  and publish its verified distribution artifacts.
+- Refreshed the README dashboard image using fully synthetic Atlas UI data.
+
 ## [1.2.0] - 2026-09-23
 
 - Redesign the local React interface around the selected Calm Performance
@@ -127,3 +135,5 @@ All notable changes to Garmin Health Sync are documented here. The project follo
 [0.11.0]: https://github.com/aarogozin/garmin-health-sync/releases/tag/v0.11.0
 [1.0.0]: https://github.com/aarogozin/garmin-health-sync/releases/tag/v1.0.0
 [1.1.0]: https://github.com/aarogozin/garmin-health-sync/releases/tag/v1.1.0
+[1.2.0]: https://github.com/aarogozin/garmin-health-sync/releases/tag/v1.2.0
+[1.2.1]: https://github.com/aarogozin/garmin-health-sync/releases/tag/v1.2.1

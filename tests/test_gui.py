@@ -169,7 +169,7 @@ def test_v1_bootstrap_and_dashboard_are_structured_and_no_store() -> None:
     assert bootstrap.status_code == 200
     payload = bootstrap.get_json()
     assert payload["status"] == "success"
-    assert payload["data"]["version"] == "1.2.0"
+    assert payload["data"]["version"] == "1.2.1"
     assert payload["data"]["csrf_token"] == "test-token"
     assert payload["data"]["sources"]["garmin"]["connected"] is True
     assert bootstrap.headers["Cache-Control"] == "no-store"
