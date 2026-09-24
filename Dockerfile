@@ -9,7 +9,7 @@ RUN CGO_ENABLED=0 GOOS=darwin GOARCH=${TARGETARCH} go build -trimpath -ldflags='
 FROM scratch AS host-helper-export
 COPY --from=host-helper /out/health-sync-host-helper /health-sync-host-helper
 
-FROM node:24-bookworm-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df AS frontend
+FROM node:25-bookworm-slim@sha256:81db02c4b671288a03915da9534dbd54f96d0e7c24d80ccc54f5b36b2e684370 AS frontend
 
 WORKDIR /source/frontend
 COPY frontend/package.json frontend/package-lock.json ./
