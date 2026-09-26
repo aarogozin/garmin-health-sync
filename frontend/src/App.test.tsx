@@ -6,15 +6,17 @@ import { App } from './App'
 
 const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
   const path = String(input)
-  const bootstrap = { version: '1.1.0', csrf_token: 'test', timezone: 'Europe/Berlin', busy: false, sources: { garmin: { connected: true, label: 'Garmin', detail: 'Connected' }, renpho: { connected: false, label: 'RENPHO', detail: 'Not connected' } }, capabilities: {}, latest_weekly_report_id: null }
+  const bootstrap = { version: '1.1.0', csrf_token: 'test', timezone: 'Europe/Berlin', busy: false, sources: { garmin: { connected: true, label: 'Garmin', detail: 'Connected' }, renpho: { connected: true, label: 'RENPHO', detail: 'Connected' } }, capabilities: {}, latest_weekly_report_id: null }
   const data = path.includes('/dashboard') && (init?.method ?? 'GET') === 'GET' ? { latest_body: null, report: null, events: [] } : path.includes('/dashboard/refresh') ? { job_id: 'dashboard-job', kind: 'dashboard-7-days' } : bootstrap
   return { ok: true, json: async () => ({ status: 'success', data }) }
 })
 vi.stubGlobal('fetch', fetchMock)
 
 test('renders the product navigation after bootstrap', async () => {
+  try { window.localStorage?.removeItem('garmin-health-sync.ui.v1.onboarding-complete') } catch { /* storage is optional in Vitest */ }
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/overview']}><App /></MemoryRouter></QueryClientProvider>)
+  render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/overview']}><App /></MemoryRouter></QueryClientProvider>);
+  (await screen.findByRole('button', { name: 'Continue to dashboard' })).click()
   // Lazy route chunks can take longer than Testing Library's 1 s default on a cold CI runner.
   expect(await screen.findByRole('heading', { name: 'Today', level: 1 }, { timeout: 5_000 })).toBeInTheDocument()
   expect(screen.getByText('Sync center')).toBeInTheDocument()
