@@ -198,6 +198,10 @@ Report vulnerabilities through [GitHub's private advisory form](https://github.c
 
 ## Troubleshooting
 
+Version 1.2.2 fixes RENPHO's `-114` login decryption error by sending the required
+app version and platform headers before authentication. Update the application
+and reconnect RENPHO through Settings if no credentials are saved in that runtime.
+
 | Symptom | What to check |
 | --- | --- |
 | Docker is unavailable | Start Docker Desktop and wait for its engine, then rerun `./health-sync start`. |
