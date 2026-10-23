@@ -61,7 +61,7 @@ test('Garmin alone does not dismiss setup and RENPHO can be explicitly skipped',
   await expect(page.getByRole('button', { name: 'Continue to dashboard' })).toBeDisabled()
   await page.getByRole('button', { name: 'Continue with Garmin only' }).click()
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible()
-  await page.reload()
+  await page.goto('/')
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible()
 })
 
