@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+- Keep source setup visible until explicitly continued; support connecting both
+  services before entering the dashboard, with an explicit Garmin-only option.
+
 ## [1.2.2] - 2026-10-23
 
 ### Fixed

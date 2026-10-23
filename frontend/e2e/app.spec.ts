@@ -7,7 +7,7 @@ const bootstrap = (connected: boolean) => ({
     version: '1.1.0', csrf_token: 'browser-test-token', timezone: 'Europe/Berlin', busy: false,
     sources: {
       garmin: { connected, label: 'Garmin Connect', detail: connected ? 'Connected: Test User' : 'No saved Garmin session' },
-      renpho: { connected: false, label: 'RENPHO', detail: 'Not connected' },
+      renpho: { connected, label: 'RENPHO', detail: connected ? 'Connected' : 'Not connected' },
     },
     capabilities: { gui_auth: true, renpho_auth: true, weekly_report: true },
     latest_weekly_report_id: null,
@@ -16,6 +16,7 @@ const bootstrap = (connected: boolean) => ({
 })
 
 async function mockApi(page: Page, connected = true) {
+  if (connected) await page.addInitScript(() => localStorage.setItem('garmin-health-sync.ui.v1.onboarding-complete', 'true'))
   await page.route('**/api/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('/bootstrap')) return route.fulfill({ json: bootstrap(connected) })
@@ -48,6 +49,29 @@ test('navigation, pressure confirmation and accessibility', async ({ page, isMob
   await page.getByRole('button', { name: 'Go back' }).click()
   const results = await new AxeBuilder({ page }).analyze()
   expect(results.violations).toEqual([])
+})
+
+test('Garmin alone does not dismiss setup and RENPHO can be explicitly skipped', async ({ page }) => {
+  await mockApi(page, false)
+  const payload = bootstrap(true)
+  payload.data.sources.renpho.connected = false
+  await page.route('**/api/v1/bootstrap', (route) => route.fulfill({ json: payload }))
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: 'Connect RENPHO' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Continue to dashboard' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Continue with Garmin only' }).click()
+  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible()
+  await page.reload()
+  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible()
+})
+
+test('both connections still require an explicit Continue on first setup', async ({ page }) => {
+  await mockApi(page, false)
+  await page.route('**/api/v1/bootstrap', (route) => route.fulfill({ json: bootstrap(true) }))
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: 'Your data, connected locally.' })).toBeVisible()
+  await page.getByRole('button', { name: 'Continue to dashboard' }).click()
+  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible()
 })
 
 test('mobile More sheet exposes every destination without replacing bottom navigation', async ({ page, isMobile }) => {
