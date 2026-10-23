@@ -1,8 +1,12 @@
+import json
 from datetime import datetime
 from typing import Any
 
 import pytest
+import requests
 from renpho import RenphoAPIError
+from renpho.constants import APP_VERSION, PLATFORM
+from renpho.crypto import encrypt_request
 
 from garmin_sync.models import BERLIN
 from garmin_sync.renpho import (
@@ -38,6 +42,39 @@ class FakeAPI:
 
     def _post(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("not used")
+
+
+def test_real_client_sends_protocol_headers_before_login(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[str] = []
+
+    def send(
+        session: requests.Session, request: requests.PreparedRequest, **kwargs: Any
+    ) -> requests.Response:
+        calls.append(str(request.url))
+        assert request.headers.get("appVersion") == APP_VERSION
+        assert request.headers.get("platform") == PLATFORM
+        assert "token" not in request.headers
+        assert kwargs["timeout"] == (10, 30)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(
+            {
+                "code": 101,
+                "data": encrypt_request({"login": {"token": "test-token", "id": 1}})[
+                    "encryptData"
+                ],
+            }
+        ).encode()
+        return response
+
+    monkeypatch.setattr(requests.Session, "send", send)
+    api = RenphoCloud(Credentials()).authenticate()
+    assert api.user_id == 1
+    assert len(calls) == 1
+    captured = capsys.readouterr()
+    assert not captured.out and not captured.err
 
 
 def test_normalize_maps_percentages_and_mass() -> None:
