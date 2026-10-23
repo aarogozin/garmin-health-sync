@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+- Update ReportLab to 5.0.1, Ruff to 0.16.4, setup-uv to 10.3.0 and
+  upload-artifact to 7.0.2; consolidate compatible Dependabot updates by ecosystem.
+
 ## [1.2.2] - 2026-10-23
 
 ### Fixed
