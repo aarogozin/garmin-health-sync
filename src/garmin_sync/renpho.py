@@ -10,6 +10,7 @@ from typing import Any, Protocol, TypeVar
 import requests
 from renpho import RenphoAPIError
 from renpho import RenphoClient as CloudClient
+from renpho.constants import APP_VERSION, PLATFORM
 from renpho.crypto import decrypt_response, encrypt_request
 
 from .models import BERLIN, BodyComposition, ValidationError
@@ -82,7 +83,11 @@ class TimeoutSession(requests.Session):
 
 def _safe_client(email: str, password: str, *, debug: bool = False) -> RenphoAPI:
     client = CloudClient(email, password, debug=debug)
-    client._transport.session = TimeoutSession()  # noqa: SLF001 -- upstream has no timeout hook
+    session = TimeoutSession()
+    # RENPHO selects the encryption protocol using these headers even at login,
+    # before a token exists. Upstream only adds them to authenticated requests.
+    session.headers.update({"appVersion": APP_VERSION, "platform": PLATFORM})
+    client._transport.session = session  # noqa: SLF001 -- upstream has no timeout hook
     return client
 
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Restore RENPHO login by sending the app version and platform protocol headers
+  before authentication. Keep the existing encrypted payload and bounded requests.
+
 ## [1.2.1] - 2026-09-23
 
 ### Fixed
