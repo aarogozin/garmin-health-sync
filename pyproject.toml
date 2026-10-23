@@ -44,7 +44,7 @@ dev = [
     "pytest>=9.0.3,<10",
     "pytest-cov>=6.2,<7",
     "ruff>=0.12,<1",
-    "types-reportlab==4.5.1.20260807",
+    "types-reportlab==5.0.0.20261008",
 ]
 
 [build-system]
