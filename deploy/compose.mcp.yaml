@@ -1,0 +1,37 @@
+services:
+  health-mcp:
+    build:
+      context: ..
+    image: garmin-health-sync:mcp
+    container_name: garmin-health-sync-mcp
+    entrypoint: ["sleep", "infinity"]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      disable: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    volumes:
+      - garmin-sync-data:/data
+      - type: bind
+        source: ${GARMIN_SYNC_ARCHIVE_HOST_DIR:?Private archive path is required}
+        target: /archive
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GARMIN_SYNC_SECRET_KEY_PATH:?Private secret key path is required}
+        target: /run/secrets/garmin_sync_key
+        read_only: true
+        bind:
+          create_host_path: false
+
+volumes:
+  garmin-sync-data:
+    external: true
+    name: garmin-health-sync_garmin-sync-data

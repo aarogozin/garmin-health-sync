@@ -1,0 +1,5 @@
+#!/bin/sh
+# Installed root-owned; sudoers permits the dedicated SSH identity no arguments.
+set -eu
+exec /usr/bin/docker exec -i --user 10001:10001 \
+  garmin-health-sync-mcp /app/.venv/bin/garmin-health-mcp

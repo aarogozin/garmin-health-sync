@@ -40,6 +40,12 @@ The launcher builds the application, initializes private storage, waits for the 
 2. Connect RENPHO if you want scale data and body synchronization.
 3. Open **Sync Center**, preview the latest measurement or history, and confirm the upload.
 4. Optionally enable the Markdown archive in **Settings**. Initial setup collects the preceding 90 days.
+5. Optionally connect Codex using [the setup below](#connect-codex-to-your-health-data).
+
+Connecting sources does not advance the screen automatically: complete each
+account you want, then select **Continue to dashboard**. If a Garmin code is
+requested, enter it in the Activity Center, which opens automatically. You can
+also continue with Garmin only and connect RENPHO later in **Settings**.
 
 The application runs in the background after the launcher exits. Use `./health-sync stop` to stop it. Closing a browser tab does not stop the container.
 
@@ -165,13 +171,96 @@ Garmin Health Sync/
 
 Notes contain versioned YAML front matter, period/timezone, source availability, and normalized tables for available body, training, pressure, recovery, activity, nutrition totals, and lifestyle data. Sources stay labeled. `PROFILE.md` provides context from the most recently archived snapshot; it is not a lifetime medical history.
 
-Daily and weekly notes omit activity titles. AI context files intentionally retain titles so an assistant can discuss specific workouts, but still exclude GPS/location data, account identifiers, avatar URLs, raw API responses, credentials and PDFs. Missing values stay missing. File names are deterministic and complete exports replace them atomically. A partial AI export remains downloadable in memory but never replaces the last complete archived context.
+Daily and weekly notes and AI context exports omit user-supplied activity titles, GPS coordinates, account identifiers, avatar URLs, raw API responses, credentials and PDFs. Missing values stay missing. File names are deterministic and complete exports replace them atomically. A partial AI export remains downloadable in memory but never replaces the last complete archived context.
 
 The files are **plain-text health data**. A defensive `.gitignore` prevents ordinary Git additions, but it does not encrypt the folder or disable backups/cloud sync. On macOS, Documents may already be synchronized with iCloud. Choose another directory if needed. Giving an AI tool this folder grants it access to the exported health information.
 
 Use **Reports → AI Health Context** to generate Current, 7-day or 30-day JSON/Markdown pairs. JSON follows `garmin-health-sync/ai-context@3`; Markdown is rendered from the same model. The top-level `summary` provides latest metrics, 7/30-day trends, data-quality flags, exercise progression and an intentionally conservative energy-balance status. Detailed timelines live under `raw_data`. Current includes today's events plus the latest dated body baseline when no measurement exists today. When Garmin records strength sets, the export preserves normalized exercise keys, set numbers, repetitions, weights, warm-up markers and provider-supplied RIR/RPE, then derives working-weight, volume and Epley estimated-1RM trends. Missing strength fields remain `null`; they are never reconstructed from heart rate or duration. Recognized exercises receive conservative, explicitly `inferred` primary/secondary muscle labels; unknown exercises remain unmapped. Logged intake remains separate from goals, Garmin activity calories are explicitly labelled, heart-rate zones are named, custom activity titles are excluded to prevent location leakage, and derived insights remain separate from provider measurements.
 
 **Reports → Download Markdown** exports the current seven-day report without enabling the archive. PDF, web and partial AI snapshots otherwise remain in memory until downloaded or the process stops.
+
+### Connect Codex to your health data
+
+This optional step connects Codex to the running local Docker installation. It
+does not add a chat or an OpenAI login to this application. Sign in to Codex
+with your ChatGPT account separately; this integration needs no OpenAI API key.
+
+1. Complete Docker startup and connect Garmin and/or RENPHO above. Keep Docker
+   Desktop and the application running.
+2. Install the Codex CLI and sign in. From this checkout, register the server:
+
+   ```bash
+   codex mcp add health_sync -- "$PWD/health-sync" mcp
+   codex mcp list
+   ```
+
+   The absolute checkout path is stored in Codex; if you move the checkout,
+   remove and add the server again. The launcher reads your existing private
+   Docker configuration and does not create credentials during an MCP call.
+3. In `~/.codex/config.toml`, add `tool_timeout_sec = 1800` under the existing
+   `[mcp_servers.health_sync]` section. A fresh collection can take several
+   minutes. Start a new Codex session and ask: “Collect my last 15 days with
+   Health Sync and summarize training, recovery and body composition.”
+
+Codex receives the health data it requests as conversation context. Review your
+privacy settings before sharing sensitive health data with any AI service. The
+server does not upload measurements; its separately identified export tool can
+write JSON and Markdown to the private archive when you explicitly request it.
+To disconnect, run `codex mcp remove health_sync`. For Codex MCP settings, see
+the [official OpenAI documentation](https://developers.openai.com/learn/docs-mcp).
+
+#### How the MCP tools work
+
+`garmin-health-mcp` runs an MCP server over standard input/output. Its data
+collection tools are read-only; optional export writes to the private archive. It
+uses the configured Garmin and RENPHO sessions and collects fresh data when a
+tool is called; collection can take several minutes. Supported tools expose a
+summary, workouts, strength progression, body composition, blood pressure,
+recovery and source availability for `current`, `7d` or `30d`.
+
+For a custom period, call `refresh_health_snapshot` with 1–90 calendar `days`,
+then use `get_snapshot_section` to inspect its summary, activities, strength,
+body, pressure, recovery or availability without fetching again. Refreshing
+replaces the in-memory snapshot. The legacy fixed-period tools remain available.
+The custom `garmin-health-sync/ai-context@4` export omits free-text notes,
+custom lifestyle labels, unknown exercise names and extended summaries to avoid
+accidentally disclosing locations or identifiers.
+
+Only when explicitly requested, `save_health_snapshot` writes a new directory
+containing matching JSON and Markdown in the configured private archive. The
+tool is marked as a write operation; existing files are not overwritten. An
+archive must first be enabled in Settings. Snapshots disappear when the MCP
+process ends.
+
+The normalized result includes health information in the Codex conversation.
+Credentials are not returned. Context is not saved unless the explicit export
+tool is requested, and no measurement uploads are performed. To run it locally, install the
+project with `uv sync`, then register it with:
+
+```bash
+codex mcp add health_sync -- /absolute/path/to/.venv/bin/garmin-health-mcp
+```
+
+Set `tool_timeout_sec = 1800` in the `[mcp_servers.health_sync]` section of
+`~/.codex/config.toml`, because fresh collection can take several minutes.
+Restart Codex or start a new session so it discovers the server. Ask it for a
+seven-day summary or a particular section; the selected health data is included
+in the conversation with OpenAI. No OpenAI API key is used by the MCP server.
+
+For a remote Zima, use a dedicated SSH key whose `authorized_keys` entry uses
+`restrict` and a forced, root-owned gateway command. The supplied
+`deploy/health-mcp-gateway` starts only the MCP executable inside the dedicated
+MCP container; it never accepts a shell command. The optional
+`deploy/compose.mcp.yaml` defines this sidecar using the existing encrypted
+data volume, key and archive mounts. Set `GARMIN_SYNC_ARCHIVE_HOST_DIR` and
+`GARMIN_SYNC_SECRET_KEY_PATH` to the existing private host paths before starting
+it; do not create a second credential store. A narrowly scoped
+sudoers rule is needed if the SSH account cannot access Docker. Register SSH as
+the MCP stdio command and enable strict host-key verification. The remote
+container retains its encrypted credential volume and must not mount the Docker
+socket or expose an MCP port. Remove the server with `codex mcp remove
+health_sync`; revoke remote access by removing only the dedicated SSH public-key
+entry and its dedicated gateway/sudoers rule.
 
 ## How synchronization works
 

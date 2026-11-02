@@ -3,10 +3,14 @@ from __future__ import annotations
 import json
 import os
 import stat
-from datetime import date, datetime
+from datetime import UTC, date, datetime
+from unittest.mock import Mock
+
+import pytest
 
 from garmin_sync.ai_context import (
     HealthContextExport,
+    build_custom_health_context,
     build_health_context,
     render_context_json,
     render_context_markdown,
@@ -15,6 +19,7 @@ from garmin_sync.archive import LocalHealthArchive
 from garmin_sync.models import BERLIN, BodyComposition
 from garmin_sync.renpho import RenphoMeasurement
 from garmin_sync.renpho_report import normalize_report
+from garmin_sync.service import HealthSyncService, ResultStatus, WeeklyReportResult
 from garmin_sync.weekly_report import build_report
 
 
@@ -109,10 +114,38 @@ def _report():
     )
 
 
+@pytest.mark.parametrize(
+    ("status", "persist_archive", "expected_write"),
+    [
+        (ResultStatus.SUCCESS, False, False),
+        (ResultStatus.SUCCESS, True, True),
+        (ResultStatus.PARTIAL, True, False),
+    ],
+)
+def test_service_context_archive_policy(tmp_path, status, persist_archive, expected_write):
+    archive = LocalHealthArchive(tmp_path / "private")
+    svc = HealthSyncService(Mock(), Mock(), Mock(), archive=archive)
+    svc.build_comprehensive_report = Mock(
+        return_value=WeeklyReportResult(status, _report(), b"")
+    )
+
+    result = svc.build_health_context("30d", persist_archive=persist_archive)
+
+    assert result.status == status
+    assert result.archived is expected_write
+    assert HealthContextExport.model_validate_json(result.json_content) == result.context
+    context_root = archive.profile_root / "context"
+    assert (context_root / "LAST_30_DAYS.json").exists() is expected_write
+    assert (context_root / "LAST_30_DAYS.md").exists() is expected_write
+    if not expected_write:
+        assert not archive.root.exists()
+
+
 def test_context_has_strict_schema_dynamics_and_inferred_muscles() -> None:
     context = build_health_context(_report(), "30d")
     payload = json.loads(render_context_json(context))
     HealthContextExport.model_validate(payload)
+
 
     assert context.body_dynamics.weight_kg is not None
     assert context.body_dynamics.weight_kg.absolute_change == -2
@@ -140,6 +173,56 @@ def test_context_has_strict_schema_dynamics_and_inferred_muscles() -> None:
     assert "Epley" in context.summary.definitions.estimated_1rm
     assert context.summary.trends_7d.period_days == 7
     assert context.summary.trends_30d.period_days == 30
+
+
+@pytest.mark.parametrize("days", [1, 7, 10, 15, 20, 30, 90])
+def test_custom_context_uses_exact_period_and_version(days: int) -> None:
+    from datetime import timedelta
+
+    context, markdown = build_custom_health_context(_report(), days)
+    assert context.schema_version == "garmin-health-sync/ai-context@4"
+    assert context.period.start_date == date(2026, 9, 19) - timedelta(days=days - 1)
+    assert context.period.days == days
+    assert 'schema_version: "garmin-health-sync/ai-context@4"' in markdown
+    assert f'period: "custom"\ndays: {days}' in markdown
+    assert all(
+        context.period.start_date <= x.measured_at.date() <= context.period.end_date
+        for x in context.raw_data.activities
+    )
+
+
+@pytest.mark.parametrize("days", [0, 91, -1, True])
+def test_custom_context_rejects_invalid_period(days: int) -> None:
+    with pytest.raises(ValueError):
+        build_custom_health_context(_report(), days)
+
+
+def test_custom_context_excludes_identifiers_and_free_text() -> None:
+    context, markdown = build_custom_health_context(_report(), 30)
+    payload = context.model_dump_json()
+    for value in ("source-secret", "report-secret", "Custom movement", "Upper body"):
+        assert value not in payload
+        assert value not in markdown
+
+
+def test_custom_context_uses_berlin_calendar_on_dst_transition() -> None:
+    report = build_report(
+        start_date=date(2026, 10, 1),
+        end_date=date(2026, 10, 25),
+        garmin={"activities": [
+            {"activityType": {"typeKey": "running"}, "startTimeLocal": "2026-10-25T00:30:00",
+             "duration": 600},
+            {"activityType": {"typeKey": "running"}, "startTimeLocal": "2026-10-24T23:30:00",
+             "duration": 600},
+        ]}, renpho=[], available=["activities"], unavailable=[],
+    )
+    context, _ = build_custom_health_context(report, 1)
+    assert context.period.start_date == date(2026, 10, 25)
+    assert all(
+        activity.measured_at.astimezone(UTC).astimezone(BERLIN).date() == date(2026, 10, 25)
+        for activity in context.raw_data.activities
+    )
+    assert len(context.raw_data.activities) == 1
 
 
 def test_current_uses_latest_body_as_dated_baseline_and_filters_events() -> None:

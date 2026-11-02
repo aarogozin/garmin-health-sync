@@ -122,7 +122,8 @@ function ActivityCenter() {
   if (!items.length) return null
   const active = items.find((job) => ['queued', 'running', 'awaiting_input'].includes(job.state))
   const persistent = items.some((job) => ['conflict', 'partial', 'uncertain', 'auth_required', 'rate_limited', 'error'].includes(job.state))
-  const drawerOpen = expanded || persistent
+  // MFA must be immediately actionable during onboarding without finding the drawer.
+  const drawerOpen = expanded || persistent || active?.state === 'awaiting_input'
   const headline = active ? (active.stage ?? 'Operation in progress') : `${items.length} recent operation${items.length === 1 ? '' : 's'}`
   return <aside className="activity-center" aria-label="Activity center">
     <div className="activity-center__head"><button className="activity-center__toggle" aria-expanded={drawerOpen} onClick={() => setExpanded((value) => !value)}><div>{active ? <LoaderCircle className="spin" /> : <CheckCircle2 />}</div><div><strong>{headline}</strong><small>{active ? active.state.replace('_', ' ') : 'Activity Center'}</small></div>{drawerOpen ? <ChevronDown /> : <ChevronUp />}</button><span className="count-badge">{items.length}</span></div>

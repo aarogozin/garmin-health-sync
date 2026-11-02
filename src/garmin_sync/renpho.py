@@ -96,9 +96,12 @@ class RenphoCloud:
         self,
         credentials: RenphoCredentials,
         factory: Callable[..., RenphoAPI] = _safe_client,
+        *,
+        retry_rejected_reads: bool = True,
     ) -> None:
         self._credentials = credentials
         self._factory = factory
+        self._retry_rejected_reads = retry_rejected_reads
         self._api: RenphoAPI | None = None
 
     def clear_session(self) -> None:
@@ -170,13 +173,13 @@ class RenphoCloud:
             try:
                 return operation(api)
             except RenphoAPIError as exc:
-                if attempt == 0:
+                if attempt == 0 and self._retry_rejected_reads:
                     self._api = None
                     continue
                 raise RenphoError(rejected_message) from exc
             except requests.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else None
-                if status in {401, 403} and attempt == 0:
+                if status in {401, 403} and attempt == 0 and self._retry_rejected_reads:
                     self._api = None
                     continue
                 if status == 429:

@@ -214,6 +214,11 @@ case "$cmd" in
     shift
     compose run --rm app "$cmd" "$@"
     ;;
+  mcp)
+    prepare_runtime
+    [[ $# -eq 1 ]] || die "usage: ./health-sync mcp"
+    compose exec -T app garmin-health-mcp
+    ;;
   schedule)
     prepare_runtime
     action="${2:-status}"
@@ -232,7 +237,7 @@ case "$cmd" in
     ;;
   *)
     cat >&2 <<'EOF'
-Usage: ./health-sync {start|stop|status|logs|update|sync daily|archive ...|context ...|schedule ...}
+Usage: ./health-sync {start|stop|status|logs|update|sync daily|archive ...|context ...|mcp|schedule ...}
 EOF
     exit 2
     ;;
