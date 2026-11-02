@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .models import BERLIN
 from .renpho_report import BodySegment, Impedance, RenphoReportData
@@ -460,6 +460,25 @@ class HealthContextExport(ExportModel):
         return self.raw_data.extended_metrics
 
 
+class CustomPeriodExport(ExportModel):
+    kind: Literal["custom"] = "custom"
+    days: int = Field(strict=True, ge=1, le=90)
+    start_date: date
+    end_date: date
+    timezone: str
+
+
+class CustomHealthContextExport(ExportModel):
+    schema_version: Literal["garmin-health-sync/ai-context@4"] = "garmin-health-sync/ai-context@4"
+    generated_at: datetime
+    period: CustomPeriodExport
+    availability: AvailabilityExport
+    privacy: PrivacyExport
+    summary: HealthContextSummaryExport
+    raw_data: HealthContextRawDataExport
+    limitations: list[str]
+
+
 _CARDIO = ("run", "walk", "hike", "cycl", "swim", "row", "elliptical", "cardio")
 _STRENGTH = ("strength", "weight", "gym")
 _MOBILITY = ("yoga", "pilates", "stretch", "mobility")
@@ -502,14 +521,16 @@ _EXERCISE_ALIASES: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
-def build_health_context(report: WeeklyHealthReport, period: ContextPeriod) -> HealthContextExport:
+def build_health_context(
+    report: WeeklyHealthReport, period: ContextPeriod, *, _days: int | None = None
+) -> HealthContextExport:
     """Project the normalized report into a privacy-safe, deterministic AI contract."""
     end = report.end_date
     start = {
         "current": end,
         "7d": end - timedelta(days=6),
         "30d": end - timedelta(days=29),
-    }[period]
+    }[period] if _days is None else end - timedelta(days=_days - 1)
 
     def in_period(timestamp: datetime) -> bool:
         return start <= timestamp.astimezone(BERLIN).date() <= end
@@ -522,7 +543,7 @@ def build_health_context(report: WeeklyHealthReport, period: ContextPeriod) -> H
     all_body = [_body(item, False) for item in report.body]
     body_in_period = [item for item in report.body if in_period(item.measured_at)]
     body_points = list(body_in_period)
-    if period == "current" and not body_points and report.body:
+    if _days is None and period == "current" and not body_points and report.body:
         body_points.append(max(report.body, key=lambda item: item.measured_at))
     body = [_body(item, not in_period(item.measured_at)) for item in body_points]
     pressure = [item for item in report.pressure.readings if in_period(item.measured_at)]
@@ -544,7 +565,7 @@ def build_health_context(report: WeeklyHealthReport, period: ContextPeriod) -> H
         for day in all_days
     ]
     daily_health = [item for item in daily_all if start <= item.day <= end]
-    if period == "current":
+    if _days is None and period == "current":
         prior = [item for item in daily_all if item.day < start and _has_daily_values(item)]
         if prior:
             daily_health.insert(0, prior[-1])
@@ -572,7 +593,7 @@ def build_health_context(report: WeeklyHealthReport, period: ContextPeriod) -> H
         period_average_systolic_mmhg=_mean([float(x.systolic) for x in pressure]),
         period_average_diastolic_mmhg=_mean([float(x.diastolic) for x in pressure]),
         days_covered=len({x.measured_at.astimezone(BERLIN).date() for x in pressure}),
-        category=report.pressure.esc_category,
+        category=report.pressure.esc_category if _days is None else _period_pressure_category(pressure),
         extreme_reading_present=any(x.systolic > 180 or x.diastolic > 120 for x in pressure),
     )
     training_summary = _training_summary(activities, summary_recovery)
@@ -620,7 +641,7 @@ def build_health_context(report: WeeklyHealthReport, period: ContextPeriod) -> H
                 source_title=x.source_title,
                 source_url=x.source_url,
             )
-            for x in (report.insights if period != "current" else ())
+            for x in (report.insights if period != "current" and _days is None else ())
         ],
     )
     return HealthContextExport(
@@ -647,6 +668,86 @@ def build_health_context(report: WeeklyHealthReport, period: ContextPeriod) -> H
             "Muscle targets are conservative local inferences from recognized exercise names, not Garmin measurements.",
         ],
     )
+
+
+def _period_pressure_category(pressure: list[Any]) -> str:
+    from .weekly_report import _esc_category
+
+    return _esc_category(
+        _mean([float(x.systolic) for x in pressure]),
+        _mean([float(x.diastolic) for x in pressure]),
+    )
+
+
+def sanitize_mcp_health_context(legacy: HealthContextExport) -> None:
+    """Remove free text from a newly collected context before it leaves MCP."""
+    # Free-form user/provider labels can contain locations or identifiers.
+    # Preserve known exercises using our controlled vocabulary only.
+    known_keys: set[str] = set()
+    for activity in legacy.raw_data.activities:
+        for exercise in activity.exercise_sets:
+            if exercise.muscles and exercise.exercise_key:
+                known_keys.add(exercise.exercise_key)
+                exercise.exercise_name = exercise.exercise_key.replace("_", " ").title()
+            else:
+                exercise.exercise_name = None
+                exercise.exercise_key = None
+            exercise.category = None
+    for reading in legacy.raw_data.blood_pressure.readings:
+        reading.notes = None
+    legacy.raw_data.training_summary.unmapped_exercises = []
+    legacy.summary.trends_7d.training.unmapped_exercises = []
+    legacy.summary.trends_30d.training.unmapped_exercises = []
+    legacy.summary.exercise_progression = [
+        item for item in legacy.summary.exercise_progression if item.exercise_key in known_keys
+    ]
+    for item in legacy.summary.exercise_progression:
+        item.exercise_names = [item.exercise_key.replace("_", " ").title()]
+    legacy.summary.strength_progress.top_progressions = [
+        item for item in legacy.summary.strength_progress.top_progressions
+        if item.exercise_key in known_keys
+    ]
+    for item in legacy.summary.strength_progress.top_progressions:
+        item.exercise_names = [item.exercise_key.replace("_", " ").title()]
+    legacy.summary.strength_progress.exercises_tracked = len(legacy.summary.exercise_progression)
+    legacy.summary.strength_progress.exercises_with_weight_trend = sum(
+        item.first_working_weight_kg is not None
+        and item.latest_working_weight_kg is not None
+        and item.sessions >= 2
+        for item in legacy.summary.exercise_progression
+    )
+    # Custom lifestyle names and extended summaries are arbitrary free text.
+    legacy.raw_data.lifestyle = []
+    legacy.raw_data.behavior_associations = []
+    legacy.raw_data.extended_metrics = []
+    legacy.limitations.append(
+        "Free-text notes, custom lifestyle labels, unknown exercise names, and extended "
+        "summaries are omitted to prevent accidental location or identifier disclosure."
+    )
+
+
+def build_custom_health_context(
+    report: WeeklyHealthReport, days: int
+) -> tuple[CustomHealthContextExport, str]:
+    """Build a versioned custom-period snapshot and matching Markdown."""
+    if isinstance(days, bool) or not 1 <= days <= 90:
+        raise ValueError("days must be between 1 and 90")
+    legacy = build_health_context(report, "30d", _days=days)
+    sanitize_mcp_health_context(legacy)
+    payload = legacy.model_dump(mode="python")
+    payload["schema_version"] = "garmin-health-sync/ai-context@4"
+    payload["period"] = {
+        "kind": "custom", "days": days,
+        "start_date": legacy.period.start_date,
+        "end_date": legacy.period.end_date,
+        "timezone": legacy.period.timezone,
+    }
+    context = CustomHealthContextExport.model_validate(payload)
+    markdown = render_context_markdown(legacy).replace(
+        'schema_version: "garmin-health-sync/ai-context@3"',
+        'schema_version: "garmin-health-sync/ai-context@4"', 1,
+    ).replace('period: "30d"', f'period: "custom"\ndays: {days}', 1)
+    return context, markdown
 
 
 def render_context_json(context: HealthContextExport) -> str:

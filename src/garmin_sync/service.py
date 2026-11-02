@@ -211,8 +211,10 @@ class HealthSyncService:
             map_tiles_enabled=map_tiles_enabled,
         )
 
-    def build_health_context(self, period: ContextPeriod) -> HealthContextResult:
-        """Collect and render canonical AI context without persisting provider payloads."""
+    def build_health_context(
+        self, period: ContextPeriod, *, persist_archive: bool = True
+    ) -> HealthContextResult:
+        """Collect canonical AI context; optionally persist a complete archive copy."""
         # Every export carries both 7- and 30-day summaries. The selected
         # period only controls raw_data, not the compact comparison windows.
         requested_days = 30
@@ -226,7 +228,7 @@ class HealthSyncService:
         json_content = render_context_json(context)
         markdown = render_context_markdown(context)
         archived = False
-        if report_result.status == ResultStatus.SUCCESS:
+        if persist_archive and report_result.status == ResultStatus.SUCCESS:
             try:
                 self.archive.write_context(period, json_content, markdown)
             except ArchiveError:

@@ -67,6 +67,7 @@ def test_commands_preserve_running_bridge_configuration(
         ("logs",),
         ("sync", "daily"),
         ("archive", "status"),
+        ("mcp",),
         ("schedule", "status"),
     ]:
         result = invoke(environment, *args)

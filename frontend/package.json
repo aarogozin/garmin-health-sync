@@ -1,6 +1,6 @@
 {
   "name": "garmin-health-sync-web",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -29,7 +29,7 @@
     "react-dom": "19.2.8",
     "react-hook-form": "7.86.0",
     "react-router-dom": "7.18.2",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.13.0",

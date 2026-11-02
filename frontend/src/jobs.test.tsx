@@ -49,6 +49,21 @@ test('successful operations dismiss themselves after one minute while failures r
   expect(screen.queryByLabelText('Activity center')).not.toBeInTheDocument()
 })
 
+test('a Garmin verification challenge opens the activity drawer automatically', async () => {
+  vi.useFakeTimers()
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const path = String(input)
+    if (path.endsWith('/dashboard/refresh')) return { ok: true, json: async () => ({ status: 'queued', data: { job_id: 'job-mfa', kind: 'Garmin login' } }) }
+    if (path.endsWith('/jobs/job-mfa')) return { ok: true, json: async () => ({ status: 'success', data: { id: 'job-mfa', state: 'awaiting_input' } }) }
+    return { ok: false, status: 500, json: async () => ({ error: { message: 'Unexpected request' } }) }
+  }))
+  render(<QueryClientProvider client={new QueryClient()}><JobsProvider><DirectActions /></JobsProvider></QueryClientProvider>)
+  fireEvent.click(screen.getByRole('button', { name: 'Start' }))
+  await act(async () => { await Promise.resolve() })
+  await act(async () => { await vi.advanceTimersByTimeAsync(750) })
+  expect(screen.getByLabelText('Garmin MFA code')).toBeVisible()
+})
+
 test('report periods count inclusive dates across daylight-saving boundaries', () => {
   expect(reportDays({ start_date: '2026-03-29', end_date: '2026-03-29' })).toBe(1)
   expect(reportDays({ start_date: '2026-03-01', end_date: '2026-03-30' })).toBe(30)

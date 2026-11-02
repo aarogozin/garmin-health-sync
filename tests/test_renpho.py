@@ -162,6 +162,20 @@ def test_fetch_does_not_loop_when_refreshed_session_is_rejected() -> None:
     assert calls == 2
 
 
+def test_fetch_can_disable_session_retry_for_snapshot_collection() -> None:
+    calls = 0
+
+    class RejectedSession(FakeAPI):
+        def get_all_measurements(self) -> list[dict[str, Any]]:
+            nonlocal calls
+            calls += 1
+            raise RenphoAPIError("Measurements", 102, "session rejected")
+
+    with pytest.raises(RenphoError):
+        RenphoCloud(Credentials(), RejectedSession, retry_rejected_reads=False).fetch()
+    assert calls == 1
+
+
 def test_authentication_requires_credentials() -> None:
     with pytest.raises(RenphoError, match="renpho login"):
         RenphoCloud(Credentials(None), FakeAPI).authenticate()

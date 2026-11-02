@@ -1,6 +1,25 @@
 # Changelog
 
-## [Unreleased]
+## [1.3.0] - 2026-11-02
+
+### Added
+
+- Connect Codex to Garmin and RENPHO through a private MCP server, collect
+  reusable 1–90 day snapshots and explicitly save matching JSON and Markdown.
+- Start the Docker-backed MCP server with `./health-sync mcp`; include an
+  isolated sidecar and restricted SSH gateway for remote deployments.
+
+### Changed
+
+- Explain first-time account setup and optional Codex connection in the web
+  onboarding and README. Keep health exports in memory unless explicitly saved.
+
+### Fixed
+
+- Open the Activity Center automatically when Garmin requests an MFA code.
+- Clear entered account passwords from the onboarding form on submission.
+
+### Earlier unreleased changes
 
 - Keep source setup visible until explicitly continued; support connecting both
   services before entering the dashboard, with an explicit Garmin-only option.
